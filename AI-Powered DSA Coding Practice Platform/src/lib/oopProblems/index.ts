@@ -1,0 +1,43 @@
+import { Problem } from '../../types/problem';
+import { CPP_OOP_PROBLEMS } from './cppOop';
+import { CLASSES_OBJECTS_PROBLEMS } from './classesObjects';
+import { CLASS_METHODS_PROBLEMS } from './classMethods';
+import { CONSTRUCTORS_PROBLEMS } from './constructors';
+import { ACCESS_SPECIFIERS_PROBLEMS } from './accessSpecifiers';
+import { ENCAPSULATION_PROBLEMS } from './encapsulation';
+import { FRIEND_FUNCTIONS_PROBLEMS } from './friendFunctions';
+import { INHERITANCE_PROBLEMS } from './inheritance';
+import { POLYMORPHISM_PROBLEMS } from './polymorphism';
+import { TEMPLATES_PROBLEMS } from './templates';
+import { FILES_PROBLEMS } from './files';
+import { CPP_DATE_PROBLEMS } from './cppDate';
+
+export {
+  CPP_OOP_PROBLEMS,
+  CLASSES_OBJECTS_PROBLEMS,
+  CLASS_METHODS_PROBLEMS,
+  CONSTRUCTORS_PROBLEMS,
+  ACCESS_SPECIFIERS_PROBLEMS,
+  ENCAPSULATION_PROBLEMS,
+  FRIEND_FUNCTIONS_PROBLEMS,
+  INHERITANCE_PROBLEMS,
+  POLYMORPHISM_PROBLEMS,
+  TEMPLATES_PROBLEMS,
+  FILES_PROBLEMS,
+  CPP_DATE_PROBLEMS,
+};
+
+export const OOP_1200_PROBLEMS: Problem[] = [
+  ...CPP_OOP_PROBLEMS,
+  ...CLASSES_OBJECTS_PROBLEMS,
+  ...CLASS_METHODS_PROBLEMS,
+  ...CONSTRUCTORS_PROBLEMS,
+  ...ACCESS_SPECIFIERS_PROBLEMS,
+  ...ENCAPSULATION_PROBLEMS,
+  ...FRIEND_FUNCTIONS_PROBLEMS,
+  ...INHERITANCE_PROBLEMS,
+  ...POLYMORPHISM_PROBLEMS,
+  ...TEMPLATES_PROBLEMS,
+  ...FILES_PROBLEMS,
+  ...CPP_DATE_PROBLEMS,
+];
