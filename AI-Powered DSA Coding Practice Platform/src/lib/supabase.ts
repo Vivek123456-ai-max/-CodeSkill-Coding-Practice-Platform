@@ -164,8 +164,8 @@ export async function resetAllRegisteredUsersData(): Promise<{ success: boolean;
       console.warn('Supabase DB zero-out notice:', dbErr);
     }
 
-    // 3. Mark reset as done with v7
-    safeLocalStorageSet('ai_dsa_reset_zero_v7', 'true');
+    // 3. Mark reset as done with v10
+    safeLocalStorageSet('ai_dsa_reset_zero_v10', 'true');
 
     // 4. Broadcast reset event to all tabs and components
     if (typeof window !== 'undefined') {
@@ -186,7 +186,7 @@ export async function resetAllRegisteredUsersData(): Promise<{ success: boolean;
 // Auto-run zero-out check once on initialization if version flag is not set
 export function checkAutoZeroOut() {
   try {
-    if (typeof window !== 'undefined' && !localStorage.getItem('ai_dsa_reset_zero_v7')) {
+    if (typeof window !== 'undefined' && !localStorage.getItem('ai_dsa_reset_zero_v10')) {
       resetAllRegisteredUsersData();
     }
   } catch {}
@@ -460,75 +460,22 @@ export function sortProblemsSerially(list: Problem[]): Problem[] {
   });
 }
 
+// In-memory runtime status cache
+const runtimeStatusCache = new Map<string, Record<string, 'not_started' | 'in_progress' | 'solved'>>();
+
 export function getStoredStatusMap(userId?: string | null): Record<string, 'not_started' | 'in_progress' | 'solved'> {
-  const consolidated: Record<string, 'not_started' | 'in_progress' | 'solved'> = {};
-
-  const processJson = (raw: string | null) => {
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        if (Array.isArray(parsed)) {
-          parsed.forEach((item: any) => {
-            if (typeof item === 'string') {
-              const canonical = resolveCanonicalProblemId(item);
-              if (canonical) consolidated[canonical] = 'solved';
-            } else if (item && typeof item === 'object') {
-              if (item.problem_id && (item.status === 'accepted' || (item.test_cases_passed && item.total_test_cases && item.test_cases_passed === item.total_test_cases))) {
-                const canonical = resolveCanonicalProblemId(item.problem_id);
-                if (canonical) consolidated[canonical] = 'solved';
-              }
-            }
-          });
-        } else {
-          for (const [key, val] of Object.entries(parsed)) {
-            const canonicalId = resolveCanonicalProblemId(key);
-            if (!canonicalId) continue;
-            if (val === 'solved') {
-              consolidated[canonicalId] = 'solved';
-            } else if (val === 'in_progress' && consolidated[canonicalId] !== 'solved') {
-              consolidated[canonicalId] = 'in_progress';
-            }
-          }
-        }
-      }
-    } catch {}
-  };
-
-  try {
-    // 1. If signed in, read strictly from this user's scoped storage ONLY
-    if (userId) {
-      const scopedKey = getUserScopedKey(LOCAL_STATUS_KEY, userId);
-      processJson(localStorage.getItem(scopedKey));
-
-      const userStatsKey = getUserScopedKey(LOCAL_STORAGE_STATS_KEY, userId);
-      const rawUserStats = localStorage.getItem(userStatsKey);
-      if (rawUserStats) {
-        try {
-          const statsObj = JSON.parse(rawUserStats);
-          if (Array.isArray(statsObj?.solved_problem_ids)) {
-            statsObj.solved_problem_ids.forEach((id: string) => {
-              const canonical = resolveCanonicalProblemId(id);
-              if (canonical) consolidated[canonical] = 'solved';
-            });
-          }
-        } catch {}
-      }
-
-      const userSubsKey = getUserScopedKey(LOCAL_STORAGE_SUBMISSIONS_KEY, userId);
-      processJson(localStorage.getItem(userSubsKey));
-    } else {
-      // 2. Guest mode: read guest keys ONLY
-      const guestKey = getUserScopedKey(LOCAL_STATUS_KEY, null);
-      processJson(localStorage.getItem(guestKey));
-      processJson(localStorage.getItem('ai_dsa_problem_status_v4_guest'));
-      processJson(localStorage.getItem('ai_dsa_submissions_v4_guest'));
-    }
-  } catch (e) {
-    console.warn('Error reading status map:', e);
+  const cacheKey = userId || 'guest';
+  if (runtimeStatusCache.has(cacheKey)) {
+    return { ...runtimeStatusCache.get(cacheKey)! };
   }
+  return {};
+}
 
-  return consolidated;
+export function setRuntimeStatus(problemId: string, status: 'not_started' | 'in_progress' | 'solved', userId?: string | null) {
+  const cacheKey = userId || 'guest';
+  const existing = runtimeStatusCache.get(cacheKey) || {};
+  existing[problemId] = status;
+  runtimeStatusCache.set(cacheKey, existing);
 }
 
 function getStoredCustomProblems(): Problem[] {
@@ -545,7 +492,7 @@ export const problemService = {
     const statusMap: Record<string, 'not_started' | 'in_progress' | 'solved'> = {};
     const customProblems = getStoredCustomProblems();
 
-    // If signed in, query user's actual accepted submissions from Supabase as primary truth
+    // If signed in, query user's actual accepted submissions from Supabase as primary single source of truth
     if (userId && isValidUUID(userId)) {
       try {
         const { data: acceptedSubs } = await db
@@ -564,15 +511,13 @@ export const problemService = {
               }
             }
           });
-          safeLocalStorageSet(getUserScopedKey(LOCAL_STATUS_KEY, userId), JSON.stringify(statusMap));
+          runtimeStatusCache.set(userId, { ...statusMap });
         }
       } catch (err) {
         console.warn('Could not query user accepted submissions in getProblems:', err);
-        // Fallback to local stored map if network/offline
-        Object.assign(statusMap, getStoredStatusMap(userId));
       }
     } else {
-      Object.assign(statusMap, getStoredStatusMap(userId));
+      Object.assign(statusMap, getStoredStatusMap(null));
     }
 
     try {
@@ -589,10 +534,14 @@ export const problemService = {
         });
 
         // CRITICAL: Problem status is strictly bound to this user's statusMap, NEVER shared DB status
-        const combined = Array.from(map.values()).map((p) => ({
-          ...p,
-          status: statusMap[p.id] || 'not_started',
-        }));
+        const combined = Array.from(map.values()).map((p) => {
+          const canonical = resolveCanonicalProblemId(p.id);
+          const solvedStatus = statusMap[p.id] || (canonical ? statusMap[canonical] : undefined) || 'not_started';
+          return {
+            ...p,
+            status: solvedStatus,
+          };
+        });
 
         return sortProblemsSerially(combined);
       }
@@ -604,10 +553,14 @@ export const problemService = {
     ALL_PROBLEMS.forEach((p) => map.set(p.id, normalizeProblem(p)));
     customProblems.forEach((p) => map.set(p.id, normalizeProblem(p)));
 
-    const combined = Array.from(map.values()).map((p) => ({
-      ...p,
-      status: statusMap[p.id] || 'not_started',
-    }));
+    const combined = Array.from(map.values()).map((p) => {
+      const canonical = resolveCanonicalProblemId(p.id);
+      const solvedStatus = statusMap[p.id] || (canonical ? statusMap[canonical] : undefined) || 'not_started';
+      return {
+        ...p,
+        status: solvedStatus,
+      };
+    });
 
     return sortProblemsSerially(combined);
   },
@@ -858,7 +811,10 @@ export const submissionService = {
   async saveSubmission(submission: Omit<CodeSubmission, 'id' | 'created_at'>, userId?: string | null): Promise<CodeSubmission> {
     const newId = crypto.randomUUID ? crypto.randomUUID() : '00000000-0000-4000-8000-' + Date.now().toString().padStart(12, '0');
     const validUserId = isValidUUID(userId) ? userId : null;
-    const validProblemId = isValidUUID(submission.problem_id) ? submission.problem_id : null;
+    const canonicalProbId = resolveCanonicalProblemId(submission.problem_id);
+    const validProblemId = isValidUUID(canonicalProbId) 
+      ? canonicalProbId 
+      : (isValidUUID(submission.problem_id) ? submission.problem_id : null);
 
     const newSub: CodeSubmission = {
       ...submission,
@@ -886,10 +842,25 @@ export const submissionService = {
       safeLocalStorageSet(storageKey, JSON.stringify(submissions.slice(0, 100)));
     } catch {}
 
-    // 4. Save to Supabase Database in background (non-blocking)
+    // 4. Save to Supabase Database (strictly prevent duplicate accepted submissions)
     try {
-      if (validProblemId) {
-        db.from('code_submissions').insert({
+      if (validProblemId && validUserId) {
+        if (newSub.status === 'accepted') {
+          const { data: existing } = await db
+            .from('code_submissions')
+            .select('id')
+            .eq('user_id', validUserId)
+            .eq('problem_id', validProblemId)
+            .eq('status', 'accepted')
+            .limit(1);
+
+          if (existing && existing.length > 0) {
+            // Already solved in database, do not insert duplicate
+            return { ...newSub, id: existing[0].id };
+          }
+        }
+
+        const { error: insertErr } = await db.from('code_submissions').insert({
           id: newSub.id,
           problem_id: validProblemId,
           user_id: validUserId,
@@ -900,41 +871,11 @@ export const submissionService = {
           total_test_cases: newSub.total_test_cases,
           execution_time_ms: newSub.execution_time_ms,
           is_autosave: newSub.is_autosave,
-        }).then(({ error: insertErr }: any) => {
-          if (insertErr) {
-            const prob = ALL_PROBLEMS.find((p) => p.id === validProblemId);
-            if (prob) {
-              db.from('problems').upsert({
-                id: prob.id,
-                book: prob.book || 'patterns',
-                order_index: prob.order_index || 1,
-                title: prob.title,
-                slug: prob.slug,
-                description: prob.description,
-                difficulty: prob.difficulty,
-                category: prob.category,
-                tags: prob.tags,
-                source: prob.source,
-                sample_test_cases: prob.sample_test_cases,
-                starter_templates: prob.starter_templates,
-                status: prob.status || 'not_started'
-              }, { onConflict: 'id' }).then(() => {
-                db.from('code_submissions').insert({
-                  id: newSub.id,
-                  problem_id: validProblemId,
-                  user_id: validUserId,
-                  language: newSub.language,
-                  code: newSub.code,
-                  status: newSub.status,
-                  test_cases_passed: newSub.test_cases_passed,
-                  total_test_cases: newSub.total_test_cases,
-                  execution_time_ms: newSub.execution_time_ms,
-                  is_autosave: newSub.is_autosave,
-                });
-              });
-            }
-          }
         });
+
+        if (insertErr) {
+          console.warn('Supabase submission insert retry:', insertErr);
+        }
       }
     } catch (e) {
       console.warn('Supabase submission insert note:', e);
@@ -1226,10 +1167,10 @@ export const userProfileService = {
       const medium_solved = dbSubmissionsMedium;
       const hard_solved = dbSubmissionsHard;
       const total_solved = solvedIds.size;
-      const current_streak = total_solved > 0 ? Math.max(statsRow?.current_streak || 1, 1) : 0;
-      const best_streak = Math.max(statsRow?.best_streak || 0, current_streak);
-      const last_active_date = total_solved > 0 ? (statsRow?.last_active_date || getLocalDateString()) : '';
-      const total_xp = total_solved > 0 ? (easy_solved * 10) + (medium_solved * 25) + (hard_solved * 50) + (current_streak * 15) : 0;
+      const current_streak = total_solved > 0 ? Math.max(statsRow?.current_streak || profileRow?.current_streak || 1, 1) : 0;
+      const best_streak = Math.max(statsRow?.best_streak || 0, profileRow?.current_streak || 0, current_streak);
+      const last_active_date = total_solved > 0 ? (statsRow?.last_active_date || profileRow?.last_active_date || getLocalDateString()) : '';
+      const total_xp = total_solved > 0 ? (easy_solved * 10) + (medium_solved * 25) + (hard_solved * 50) + (current_streak * 15) + (statsRow?.revision_bonus_xp || 0) : (statsRow?.revision_bonus_xp || 0);
 
       const userStats: UserStats = {
         easy_solved,
@@ -1268,26 +1209,35 @@ export const userProfileService = {
           medium_solved,
           hard_solved,
           current_streak,
-          last_active_date,
+          last_active_date: last_active_date || null,
           preferred_language: 'cpp',
           updated_at: new Date().toISOString(),
         },
         { onConflict: 'id' }
       );
 
-      await db.from('user_stats').upsert(
-        {
+      if (statsRow?.id) {
+        await db.from('user_stats').update({
+          total_solved,
+          easy_solved,
+          medium_solved,
+          hard_solved,
+          current_streak,
+          last_active_date: last_active_date || null,
+          updated_at: new Date().toISOString(),
+        }).eq('id', statsRow.id);
+      } else {
+        await db.from('user_stats').insert({
           user_id: user.id,
           total_solved,
           easy_solved,
           medium_solved,
           hard_solved,
           current_streak,
-          last_active_date,
+          last_active_date: last_active_date || null,
           updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'user_id' }
-      );
+        });
+      }
 
       // Broadcast solve sync event to notify ProblemContext and all open UI components
       try {
@@ -1312,14 +1262,23 @@ export const userStatsService = {
     const yesterday = getYesterdayDateString();
 
     const solvedSet = new Set<string>();
+    let current_streak = 0;
+    let best_streak = 0;
+    let last_active_date = '';
+    let active_dates: string[] = [];
+    let revision_solved_count = 0;
+    let revision_bonus_xp = 0;
+    let revision_completed_ids: string[] = [];
 
     if (userId && isValidUUID(userId)) {
       try {
-        const { data: acceptedSubs } = await db
-          .from('code_submissions')
-          .select('problem_id, status, test_cases_passed, total_test_cases')
-          .eq('user_id', userId);
+        const [subsRes, profRes, statsRes] = await Promise.all([
+          db.from('code_submissions').select('problem_id, status, test_cases_passed, total_test_cases').eq('user_id', userId),
+          db.from('profiles').select('*').eq('id', userId).maybeSingle(),
+          db.from('user_stats').select('*').eq('user_id', userId).maybeSingle()
+        ]);
 
+        const acceptedSubs = subsRes.data;
         if (acceptedSubs && Array.isArray(acceptedSubs)) {
           acceptedSubs.forEach((s: any) => {
             const isAccepted = s.status === 'accepted' || 
@@ -1330,14 +1289,16 @@ export const userStatsService = {
             }
           });
         }
+
+        const profData = profRes.data;
+        const statsData = statsRes.data;
+
+        if (profData?.current_streak) current_streak = Math.max(current_streak, profData.current_streak);
+        if (statsData?.current_streak) current_streak = Math.max(current_streak, statsData.current_streak);
+        if (profData?.last_active_date) last_active_date = profData.last_active_date;
+        if (statsData?.last_active_date) last_active_date = statsData.last_active_date;
       } catch {}
     }
-
-    // Also check user's scoped status map
-    const statusMap = getStoredStatusMap(userId);
-    Object.keys(statusMap).forEach((id) => {
-      if (statusMap[id] === 'solved') solvedSet.add(id);
-    });
 
     const solvedArr = Array.from(solvedSet);
 
@@ -1353,39 +1314,14 @@ export const userStatsService = {
       else if (diff === 'Hard') hardCount++;
     });
 
-    let revision_solved_count = 0;
-    let revision_bonus_xp = 0;
-    let revision_completed_ids: string[] = [];
-    let current_streak = 0;
-    let best_streak = 0;
-    let last_active_date = '';
-    let active_dates: string[] = [];
-
-    try {
-      const storageKey = getUserScopedKey(LOCAL_STORAGE_STATS_KEY, userId);
-      const raw = localStorage.getItem(storageKey);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        revision_solved_count = parsed.revision_solved_count || 0;
-        revision_bonus_xp = parsed.revision_bonus_xp || 0;
-        revision_completed_ids = Array.isArray(parsed.revision_completed_ids) ? parsed.revision_completed_ids : [];
-        current_streak = parsed.current_streak || 0;
-        best_streak = parsed.best_streak || 0;
-        last_active_date = parsed.last_active_date || '';
-        active_dates = Array.isArray(parsed.active_dates) ? parsed.active_dates : [];
-      }
-    } catch {}
-
     const total_solved = solvedArr.length;
 
     if (total_solved > 0) {
       if (!last_active_date) {
         last_active_date = today;
         active_dates = [today];
-        current_streak = Math.max(current_streak, 1);
-      } else if (last_active_date !== today && last_active_date !== yesterday) {
-        current_streak = 1;
       }
+      current_streak = Math.max(current_streak, 1);
     } else {
       current_streak = 0;
       best_streak = 0;
@@ -1417,10 +1353,6 @@ export const userStatsService = {
       solved_problem_ids: solvedArr
     };
 
-    // Save back consolidated stats
-    const storageKey = getUserScopedKey(LOCAL_STORAGE_STATS_KEY, userId);
-    safeLocalStorageSet(storageKey, JSON.stringify(stats));
-
     return stats;
   },
 
@@ -1436,8 +1368,10 @@ export const userStatsService = {
       stats.solved_problem_ids = [];
     }
 
+    const canonicalProbId = options?.problemId ? resolveCanonicalProblemId(options.problemId) : '';
     const isAlreadySolved = Boolean(
       options?.alreadySolved || 
+      (canonicalProbId && stats.solved_problem_ids.includes(canonicalProbId)) ||
       (options?.problemId && stats.solved_problem_ids.includes(options.problemId))
     );
 
@@ -1448,29 +1382,92 @@ export const userStatsService = {
       if (difficulty === 'Medium') stats.medium_solved += 1;
       if (difficulty === 'Hard') stats.hard_solved += 1;
 
-      if (options?.problemId && !stats.solved_problem_ids.includes(options.problemId)) {
-        stats.solved_problem_ids.push(options.problemId);
+      if (canonicalProbId && !stats.solved_problem_ids.includes(canonicalProbId)) {
+        stats.solved_problem_ids.push(canonicalProbId);
       }
 
       // Base XP only for new non-revision solves
       const baseXP = difficulty === 'Easy' ? 10 : difficulty === 'Medium' ? 25 : 50;
       stats.total_xp = (stats.total_xp || 0) + baseXP;
-    }
 
-    // 2. Calculate Streak
-    if (stats.last_active_date === today) {
-      if (stats.current_streak === 0) stats.current_streak = 1;
-    } else if (stats.last_active_date === yesterday) {
-      stats.current_streak += 1;
-    } else {
-      stats.current_streak = 1;
-    }
+      // 2. Calculate Streak
+      if (stats.last_active_date === today) {
+        if (stats.current_streak === 0) stats.current_streak = 1;
+      } else if (stats.last_active_date === yesterday) {
+        stats.current_streak += 1;
+      } else {
+        stats.current_streak = 1;
+      }
 
-    stats.last_active_date = today;
-    if (!stats.active_dates.includes(today)) {
-      stats.active_dates.push(today);
+      stats.last_active_date = today;
+      if (!stats.active_dates.includes(today)) {
+        stats.active_dates.push(today);
+      }
+      stats.best_streak = Math.max(stats.best_streak, stats.current_streak);
+
+      // Sync stats to Supabase profiles & user_stats immediately
+      try {
+        const saveToSupabase = async (uid: string) => {
+          const prof = userProfileService.getProfile(uid);
+          await db.from('profiles').upsert(
+            {
+              id: uid,
+              display_name: prof.display_name,
+              avatar_url: prof.avatar,
+              total_solved: stats.total_solved,
+              easy_solved: stats.easy_solved,
+              medium_solved: stats.medium_solved,
+              hard_solved: stats.hard_solved,
+              current_streak: stats.current_streak,
+              last_active_date: stats.last_active_date || null,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'id' }
+          );
+
+          const { data: existingStat } = await db.from('user_stats').select('id').eq('user_id', uid).maybeSingle();
+          if (existingStat?.id) {
+            await db.from('user_stats').update({
+              total_solved: stats.total_solved,
+              easy_solved: stats.easy_solved,
+              medium_solved: stats.medium_solved,
+              hard_solved: stats.hard_solved,
+              current_streak: stats.current_streak,
+              last_active_date: stats.last_active_date || null,
+              updated_at: new Date().toISOString(),
+            }).eq('id', existingStat.id);
+          } else {
+            await db.from('user_stats').insert({
+              user_id: uid,
+              total_solved: stats.total_solved,
+              easy_solved: stats.easy_solved,
+              medium_solved: stats.medium_solved,
+              hard_solved: stats.hard_solved,
+              current_streak: stats.current_streak,
+              last_active_date: stats.last_active_date || null,
+              updated_at: new Date().toISOString(),
+            });
+          }
+        };
+
+        if (options?.userId) {
+          saveToSupabase(options.userId).catch((err) =>
+            console.warn('Direct Supabase stats sync error:', err)
+          );
+        } else {
+          supabase.auth.getSession().then(({ data: { session } }) => {
+            const userId = session?.user?.id;
+            if (userId) {
+              saveToSupabase(userId).catch((err) =>
+                console.warn('Session Supabase stats sync error:', err)
+              );
+            }
+          });
+        }
+      } catch (e) {
+        console.warn('Supabase stats sync note:', e);
+      }
     }
-    stats.best_streak = Math.max(stats.best_streak, stats.current_streak);
 
     // 3. Revision Bonus (if in revision mode)
     if (options?.isRevision) {
@@ -1487,63 +1484,6 @@ export const userStatsService = {
       }
     }
 
-    // Persist to user-scoped local storage
-    const storageKey = getUserScopedKey(LOCAL_STORAGE_STATS_KEY, options?.userId);
-    safeLocalStorageSet(storageKey, JSON.stringify(stats));
-
-    // Sync stats to Supabase profiles & user_stats immediately
-    try {
-      const saveToSupabase = async (uid: string) => {
-        const prof = userProfileService.getProfile(uid);
-        await db.from('profiles').upsert(
-          {
-            id: uid,
-            display_name: prof.display_name,
-            avatar_url: prof.avatar,
-            total_solved: stats.total_solved,
-            easy_solved: stats.easy_solved,
-            medium_solved: stats.medium_solved,
-            hard_solved: stats.hard_solved,
-            current_streak: stats.current_streak,
-            last_active_date: stats.last_active_date,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'id' }
-        );
-
-        await db.from('user_stats').upsert(
-          {
-            user_id: uid,
-            total_solved: stats.total_solved,
-            easy_solved: stats.easy_solved,
-            medium_solved: stats.medium_solved,
-            hard_solved: stats.hard_solved,
-            current_streak: stats.current_streak,
-            last_active_date: stats.last_active_date,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'user_id' }
-        );
-      };
-
-      if (options?.userId) {
-        saveToSupabase(options.userId).catch((err) =>
-          console.warn('Direct Supabase stats sync error:', err)
-        );
-      } else {
-        supabase.auth.getSession().then(({ data: { session } }) => {
-          const userId = session?.user?.id;
-          if (userId) {
-            saveToSupabase(userId).catch((err) =>
-              console.warn('Session Supabase stats sync error:', err)
-            );
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('Supabase stats sync note:', e);
-    }
-
     return stats;
   },
 
@@ -1553,25 +1493,8 @@ export const userStatsService = {
     userId?: string | null
   ): Promise<UserStats> {
     const stats = await this.getStats(userId);
-    const today = getLocalDateString();
-    const yesterday = getYesterdayDateString();
 
-    // 1. Streak update
-    if (stats.last_active_date === today) {
-      if (stats.current_streak === 0) stats.current_streak = 1;
-    } else if (stats.last_active_date === yesterday) {
-      stats.current_streak += 1;
-    } else {
-      stats.current_streak = 1;
-    }
-
-    stats.last_active_date = today;
-    if (!stats.active_dates.includes(today)) {
-      stats.active_dates.push(today);
-    }
-    stats.best_streak = Math.max(stats.best_streak, stats.current_streak);
-
-    // 2. Award +50 XP Revision Bonus
+    // 1. Award +50 XP Revision Bonus
     const revisionBonus = 50;
     stats.total_xp = (stats.total_xp || 0) + revisionBonus;
     stats.revision_solved_count = (stats.revision_solved_count || 0) + 1;
@@ -1580,63 +1503,6 @@ export const userStatsService = {
     if (!stats.revision_completed_ids) stats.revision_completed_ids = [];
     if (!stats.revision_completed_ids.includes(problemId)) {
       stats.revision_completed_ids.push(problemId);
-    }
-
-    // Explicitly NO database write to total_solved, easy_solved, etc.
-    const storageKey = getUserScopedKey(LOCAL_STORAGE_STATS_KEY, userId);
-    safeLocalStorageSet(storageKey, JSON.stringify(stats));
-
-    // Sync stats to Supabase profiles & user_stats
-    try {
-      const saveToSupabase = async (uid: string) => {
-        const prof = userProfileService.getProfile(uid);
-        await db.from('profiles').upsert(
-          {
-            id: uid,
-            display_name: prof.display_name,
-            avatar_url: prof.avatar,
-            total_solved: stats.total_solved,
-            easy_solved: stats.easy_solved,
-            medium_solved: stats.medium_solved,
-            hard_solved: stats.hard_solved,
-            current_streak: stats.current_streak,
-            last_active_date: stats.last_active_date,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'id' }
-        );
-
-        await db.from('user_stats').upsert(
-          {
-            user_id: uid,
-            total_solved: stats.total_solved,
-            easy_solved: stats.easy_solved,
-            medium_solved: stats.medium_solved,
-            hard_solved: stats.hard_solved,
-            current_streak: stats.current_streak,
-            last_active_date: stats.last_active_date,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'user_id' }
-        );
-      };
-
-      if (userId) {
-        saveToSupabase(userId).catch((err) =>
-          console.warn('Direct Supabase stats sync error:', err)
-        );
-      } else {
-        supabase.auth.getSession().then(({ data: { session } }) => {
-          const uId = session?.user?.id;
-          if (uId) {
-            saveToSupabase(uId).catch((err) =>
-              console.warn('Session Supabase stats sync error:', err)
-            );
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('Supabase stats sync note:', e);
     }
 
     return stats;
@@ -1649,8 +1515,6 @@ export const userStatsService = {
   async resetRevisionDeck(userId?: string | null): Promise<UserStats> {
     const stats = await this.getStats(userId);
     stats.revision_completed_ids = [];
-    const storageKey = getUserScopedKey(LOCAL_STORAGE_STATS_KEY, userId);
-    safeLocalStorageSet(storageKey, JSON.stringify(stats));
     return stats;
   },
 
@@ -1687,16 +1551,14 @@ export const leaderboardService = {
     const dbEntriesMap = new Map<string, Omit<LeaderboardEntry, 'rank'>>();
 
     try {
-      // Parallel fetch for profiles, code submissions, and user stats
-      const [profilesRes, submissionsRes, userStatsRes] = await Promise.all([
+      // Parallel fetch for profiles and code submissions
+      const [profilesRes, submissionsRes] = await Promise.all([
         db.from('profiles').select('*'),
         db.from('code_submissions').select('user_id, problem_id, status, test_cases_passed, total_test_cases'),
-        db.from('user_stats').select('*'),
       ]);
 
       const dbProfiles = profilesRes.data || [];
       const allSubs = submissionsRes.data || [];
-      const dbStats = userStatsRes.data || [];
 
       // Build a map of user_id -> solved problem difficulty counts from actual accepted submissions
       const userSubmissionsMap = new Map<string, { total: number; easy: number; medium: number; hard: number; problemIds: Set<string> }>();
@@ -1724,30 +1586,16 @@ export const leaderboardService = {
         });
       }
 
-      // Map user stats table by user_id
-      const statsMap = new Map<string, any>();
-      if (Array.isArray(dbStats)) {
-        dbStats.forEach((st: any) => {
-          if (st.user_id) statsMap.set(st.user_id, st);
-        });
-      }
-
       if (Array.isArray(dbProfiles) && dbProfiles.length > 0) {
         dbProfiles.forEach((p: any) => {
           const isThisCurrentUser = currentUserId ? p.id === currentUserId : false;
           const subInfo = userSubmissionsMap.get(p.id);
-          const stInfo = statsMap.get(p.id);
 
-          const subEasy = subInfo?.easy || 0;
-          const subMedium = subInfo?.medium || 0;
-          const subHard = subInfo?.hard || 0;
-          const subTotal = subInfo?.total || 0;
-
-          const eSolved = subEasy;
-          const mSolved = subMedium;
-          const hSolved = subHard;
-          const tSolved = subTotal;
-          const streak = tSolved > 0 ? Math.max(stInfo?.current_streak || 1, 1) : 0;
+          const eSolved = subInfo?.easy || 0;
+          const mSolved = subInfo?.medium || 0;
+          const hSolved = subInfo?.hard || 0;
+          const tSolved = subInfo?.total || 0;
+          const streak = tSolved > 0 ? (p.current_streak || 1) : 0;
           const xp = tSolved > 0 ? (eSolved * 10) + (mSolved * 25) + (hSolved * 50) + (streak * 15) : 0;
 
           const displayName = p.display_name || (p.email ? p.email.split('@')[0] : 'Coder');
@@ -1768,47 +1616,8 @@ export const leaderboardService = {
             badge: xp >= 5000 ? 'Knight 🛡️' : xp >= 1500 ? 'Expert 🌟' : xp >= 500 ? 'Aspirant 🚀' : 'Novice 🌱',
             isCurrentUser: isThisCurrentUser,
           });
-
-          // Heal profiles table in the background if out of sync
-          if (tSolved !== (p.total_solved || 0) || (tSolved === 0 && (p.current_streak || 0) > 0)) {
-            db.from('profiles').update({
-              total_solved: tSolved,
-              easy_solved: eSolved,
-              medium_solved: mSolved,
-              hard_solved: hSolved,
-              current_streak: streak,
-              updated_at: new Date().toISOString()
-            }).eq('id', p.id).then(() => {});
-          }
         });
       }
-
-      // Also include users who submitted solutions but may not have a profile row
-      userSubmissionsMap.forEach((subInfo, uId) => {
-        if (!dbEntriesMap.has(uId)) {
-          const eSolved = subInfo.easy;
-          const mSolved = subInfo.medium;
-          const hSolved = subInfo.hard;
-          const tSolved = subInfo.total;
-          const streak = tSolved > 0 ? 1 : 0;
-          const xp = tSolved > 0 ? (eSolved * 10) + (mSolved * 25) + (hSolved * 50) + (streak * 15) : 0;
-          dbEntriesMap.set(uId, {
-            id: uId,
-            name: `Coder ${uId.slice(0, 4)}`,
-            username: `coder_${uId.slice(0, 6)}`,
-            avatar: 'coder',
-            institution: 'Registered Learner',
-            total_xp: xp,
-            total_solved: tSolved,
-            easy_solved: eSolved,
-            medium_solved: mSolved,
-            hard_solved: hSolved,
-            current_streak: streak,
-            badge: xp >= 5000 ? 'Knight 🛡️' : xp >= 1500 ? 'Expert 🌟' : xp >= 500 ? 'Aspirant 🚀' : 'Novice 🌱',
-            isCurrentUser: currentUserId === uId,
-          });
-        }
-      });
     } catch (e) {
       console.warn('Leaderboard Supabase fetch note:', e);
     }
@@ -1901,6 +1710,365 @@ export const leaderboardService = {
       .subscribe();
   }
 };
+
+// ==============================================================================
+// 👑 SECURE ADMIN SERVICE
+// Single Authorized Admin: ktvivek12345@gmail.com / Vivek12345@
+// ==============================================================================
+export const ADMIN_CONFIG = {
+  EMAIL: 'ktvivek12345@gmail.com',
+  PASSWORD_HASH: 'Vivek12345@',
+};
+
+const ADMIN_SESSION_KEY = 'ai_dsa_admin_session_auth_v1';
+
+export interface AdminUserRecord {
+  id: string;
+  email: string;
+  display_name: string;
+  avatar_url: string;
+  total_solved: number;
+  easy_solved: number;
+  medium_solved: number;
+  hard_solved: number;
+  current_streak: number;
+  last_active_date: string | null;
+  total_xp: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export const adminService = {
+  async verifyAdmin(email?: string, password?: string): Promise<boolean> {
+    if (!email || !password) return false;
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanPass = password.trim();
+
+    if (cleanEmail === ADMIN_CONFIG.EMAIL.toLowerCase() && cleanPass === ADMIN_CONFIG.PASSWORD_HASH) {
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify({
+          email: cleanEmail,
+          authenticated: true,
+          timestamp: Date.now()
+        }));
+      }
+      return true;
+    }
+
+    // Also verify if user can authenticate via Supabase Auth as the admin email
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password: cleanPass,
+      });
+      if (!error && data.user && data.user.email?.toLowerCase() === ADMIN_CONFIG.EMAIL.toLowerCase()) {
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify({
+            email: cleanEmail,
+            authenticated: true,
+            timestamp: Date.now()
+          }));
+        }
+        return true;
+      }
+    } catch {}
+
+    return false;
+  },
+
+  isAdminSessionActive(): boolean {
+    if (typeof window === 'undefined') return false;
+    try {
+      const raw = sessionStorage.getItem(ADMIN_SESSION_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return parsed.authenticated === true && parsed.email?.toLowerCase() === ADMIN_CONFIG.EMAIL.toLowerCase();
+      }
+    } catch {}
+    return false;
+  },
+
+  logoutAdmin() {
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem(ADMIN_SESSION_KEY);
+    }
+  },
+
+  async getAllUsers(): Promise<AdminUserRecord[]> {
+    try {
+      const [profRes, subsRes] = await Promise.all([
+        db.from('profiles').select('*').order('created_at', { ascending: false }),
+        db.from('code_submissions').select('user_id, problem_id, status')
+      ]);
+
+      const profiles = profRes.data || [];
+      const allSubs = subsRes.data || [];
+
+      const userSubCounts = new Map<string, { total: number; easy: number; medium: number; hard: number; ids: Set<string> }>();
+      allSubs.forEach((sub: any) => {
+        if (!sub.user_id || sub.status !== 'accepted') return;
+        if (!userSubCounts.has(sub.user_id)) {
+          userSubCounts.set(sub.user_id, { total: 0, easy: 0, medium: 0, hard: 0, ids: new Set() });
+        }
+        const info = userSubCounts.get(sub.user_id)!;
+        const canonical = resolveCanonicalProblemId(sub.problem_id);
+        if (canonical && !info.ids.has(canonical)) {
+          info.ids.add(canonical);
+          const prob = ALL_PROBLEMS.find((p) => p.id === canonical);
+          const diff = prob?.difficulty || 'Easy';
+          if (diff === 'Easy') info.easy++;
+          else if (diff === 'Medium') info.medium++;
+          else if (diff === 'Hard') info.hard++;
+          info.total++;
+        }
+      });
+
+      return profiles.map((p: any) => {
+        const subInfo = userSubCounts.get(p.id);
+        const easy = subInfo?.easy || 0;
+        const medium = subInfo?.medium || 0;
+        const hard = subInfo?.hard || 0;
+        const total = subInfo?.total || 0;
+        const streak = total > 0 ? (p.current_streak || 1) : 0;
+        const xp = total > 0 ? (easy * 10) + (medium * 25) + (hard * 50) + (streak * 15) : 0;
+
+        return {
+          id: p.id,
+          email: p.email,
+          display_name: p.display_name,
+          avatar_url: p.avatar_url || 'coder',
+          total_solved: total,
+          easy_solved: easy,
+          medium_solved: medium,
+          hard_solved: hard,
+          current_streak: streak,
+          last_active_date: p.last_active_date,
+          total_xp: xp,
+          created_at: p.created_at,
+          updated_at: p.updated_at,
+        };
+      });
+    } catch (e) {
+      console.warn('Admin getAllUsers error:', e);
+      return [];
+    }
+  },
+
+  async updateUserStats(
+    userId: string,
+    updates: {
+      total_solved?: number;
+      easy_solved?: number;
+      medium_solved?: number;
+      hard_solved?: number;
+      current_streak?: number;
+      display_name?: string;
+    }
+  ): Promise<boolean> {
+    try {
+      const { error: profErr } = await db.from('profiles').update({
+        ...updates,
+        updated_at: new Date().toISOString()
+      }).eq('id', userId);
+
+      await db.from('user_stats').update({
+        ...updates,
+        updated_at: new Date().toISOString()
+      }).eq('user_id', userId);
+
+      // Broadcast update event to all connected devices
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('codetutor_status_synced', { detail: { userId } }));
+        if ('BroadcastChannel' in window) {
+          const bc = new BroadcastChannel('codetutor_live_channel');
+          bc.postMessage({ type: 'STATUS_SYNC', userId });
+          bc.close();
+        }
+      }
+
+      return !profErr;
+    } catch {
+      return false;
+    }
+  },
+
+  async resetUserToZero(userId: string): Promise<boolean> {
+    try {
+      await db.from('code_submissions').delete().eq('user_id', userId);
+      await db.from('profiles').update({
+        total_solved: 0,
+        easy_solved: 0,
+        medium_solved: 0,
+        hard_solved: 0,
+        current_streak: 0,
+        last_active_date: null,
+        updated_at: new Date().toISOString()
+      }).eq('id', userId);
+
+      await db.from('user_stats').update({
+        total_solved: 0,
+        easy_solved: 0,
+        medium_solved: 0,
+        hard_solved: 0,
+        current_streak: 0,
+        last_active_date: null,
+        updated_at: new Date().toISOString()
+      }).eq('user_id', userId);
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('codetutor_status_synced', { detail: { userId } }));
+        if ('BroadcastChannel' in window) {
+          const bc = new BroadcastChannel('codetutor_live_channel');
+          bc.postMessage({ type: 'STATUS_SYNC', userId });
+          bc.close();
+        }
+      }
+
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  async resetAllUsersToZero(): Promise<{ success: boolean; message: string }> {
+    return await resetAllRegisteredUsersData();
+  },
+
+  async getAllSubmissions(limit = 100): Promise<any[]> {
+    try {
+      const { data, error } = await db
+        .from('code_submissions')
+        .select(`
+          id,
+          problem_id,
+          user_id,
+          language,
+          code,
+          status,
+          test_cases_passed,
+          total_test_cases,
+          execution_time_ms,
+          created_at
+        `)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (error || !data) return [];
+      return data;
+    } catch {
+      return [];
+    }
+  },
+
+  async getUserSubmissions(userId: string): Promise<any[]> {
+    try {
+      const { data, error } = await db
+        .from('code_submissions')
+        .select(`
+          id,
+          problem_id,
+          user_id,
+          language,
+          code,
+          status,
+          test_cases_passed,
+          total_test_cases,
+          execution_time_ms,
+          created_at
+        `)
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+
+      if (error || !data) return [];
+
+      return data.map((sub: any) => {
+        const canonical = resolveCanonicalProblemId(sub.problem_id);
+        const prob = ALL_PROBLEMS.find((p) => p.id === canonical);
+        return {
+          ...sub,
+          canonical_id: canonical || sub.problem_id,
+          problem_title: prob?.title || sub.problem_id,
+          problem_book: prob?.book || prob?.category || 'General',
+          problem_difficulty: prob?.difficulty || 'Easy',
+          order_index: prob?.order_index || 0,
+        };
+      });
+    } catch {
+      return [];
+    }
+  },
+
+  async deleteSubmission(submissionId: string): Promise<boolean> {
+    try {
+      const { error } = await db.from('code_submissions').delete().eq('id', submissionId);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('codetutor_status_synced'));
+      }
+      return !error;
+    } catch {
+      return false;
+    }
+  },
+
+  broadcastAnnouncement(title: string, message: string, type: 'info' | 'success' | 'warning' | 'alert' = 'info') {
+    try {
+      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+        const bc = new BroadcastChannel('codetutor_live_channel');
+        bc.postMessage({
+          type: 'ADMIN_ANNOUNCEMENT',
+          payload: { title, message, type, timestamp: Date.now() }
+        });
+        bc.close();
+      }
+
+      // Also trigger via Realtime channel
+      const channel = supabase.channel('admin_broadcast_feed');
+      channel.send({
+        type: 'broadcast',
+        event: 'announcement',
+        payload: { title, message, type, timestamp: Date.now() }
+      });
+    } catch (e) {
+      console.warn('Broadcast note:', e);
+    }
+  },
+
+  subscribeToAdminFeed(onUpdate: () => void): RealtimeChannel {
+    return supabase
+      .channel('admin_live_feed')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => onUpdate())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'code_submissions' }, () => onUpdate())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_stats' }, () => onUpdate())
+      .subscribe();
+  },
+
+  subscribeToBroadcasts(onAnnouncement: (announcement: { title: string; message: string; type: 'info' | 'success' | 'warning' | 'alert'; timestamp: number }) => void): () => void {
+    let bc: BroadcastChannel | null = null;
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      bc = new BroadcastChannel('codetutor_live_channel');
+      bc.onmessage = (e) => {
+        if (e.data?.type === 'ADMIN_ANNOUNCEMENT' && e.data.payload) {
+          onAnnouncement(e.data.payload);
+        }
+      };
+    }
+
+    const channel = supabase
+      .channel('admin_broadcast_feed')
+      .on('broadcast', { event: 'announcement' }, (payload: any) => {
+        if (payload?.payload) {
+          onAnnouncement(payload.payload);
+        }
+      })
+      .subscribe();
+
+    return () => {
+      if (bc) bc.close();
+      channel.unsubscribe();
+    };
+  }
+};
+
 
 
 

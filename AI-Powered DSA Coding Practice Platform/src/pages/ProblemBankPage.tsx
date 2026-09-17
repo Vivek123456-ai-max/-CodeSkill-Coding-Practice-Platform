@@ -563,17 +563,17 @@ grant all on table public.problems to anon, authenticated, service_role;`;
                 <div
                   key={problem.id}
                   onClick={() => onSelectProblem(problem)}
-                  className={`p-4 transition cursor-pointer flex items-center justify-between gap-4 group border-b border-slate-800/80 ${
+                  className={`p-3.5 sm:p-4 transition cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 group border-b border-slate-800/80 ${
                     isSolved
                       ? 'bg-emerald-950/20 hover:bg-emerald-950/40 border-l-4 border-l-emerald-500'
                       : 'hover:bg-slate-800/60'
                   }`}
                 >
-                  <div className="flex items-center gap-3.5 min-w-0">
-                    <div>
+                  <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
+                    <div className="shrink-0 mt-0.5 sm:mt-0">
                       {isSolved ? (
-                        <div className="w-7 h-7 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                        <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center">
+                          <CheckCircle2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400" />
                         </div>
                       ) : problem.status === 'in_progress' ? (
                         <Clock className="w-5 h-5 text-amber-400" />
@@ -582,8 +582,8 @@ grant all on table public.problems to anon, authenticated, service_role;`;
                       )}
                     </div>
 
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className={`font-semibold text-sm truncate ${
                           isSolved ? 'text-emerald-300 font-bold group-hover:text-emerald-200' : 'text-slate-200 group-hover:text-white'
                         }`}>
@@ -611,35 +611,38 @@ grant all on table public.problems to anon, authenticated, service_role;`;
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3 shrink-0">
-                    {/* Star / Bookmark Toggle Button */}
-                    <button
-                      onClick={(e) => toggleBookmark(e, problem.id)}
-                      title={isBookmarked ? 'Remove Bookmark' : 'Bookmark Question'}
-                      className={`p-1.5 rounded-lg transition ${
-                        isBookmarked
-                          ? 'text-yellow-400 bg-yellow-400/10 hover:bg-yellow-400/20'
-                          : 'text-slate-500 hover:text-yellow-400 hover:bg-slate-800'
-                      }`}
-                    >
-                      <Star className={`w-4 h-4 ${isBookmarked ? 'fill-yellow-400' : ''}`} />
-                    </button>
+                  <div className="flex items-center justify-between sm:justify-end gap-2.5 sm:gap-3 shrink-0 w-full sm:w-auto pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-800/60">
+                    <div className="flex items-center gap-2">
+                      {/* Star / Bookmark Toggle Button */}
+                      <button
+                        onClick={(e) => toggleBookmark(e, problem.id)}
+                        title={isBookmarked ? 'Remove Bookmark' : 'Bookmark Question'}
+                        className={`p-1.5 rounded-lg transition ${
+                          isBookmarked
+                            ? 'text-yellow-400 bg-yellow-400/10 hover:bg-yellow-400/20'
+                            : 'text-slate-500 hover:text-yellow-400 hover:bg-slate-800'
+                        }`}
+                      >
+                        <Star className={`w-4 h-4 ${isBookmarked ? 'fill-yellow-400' : ''}`} />
+                      </button>
 
-                    <span
-                      className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
-                        isSolved 
-                          ? 'text-emerald-300 bg-emerald-500/15 border-emerald-500/40' 
-                          : getDifficultyBadge(problem.difficulty)
-                      }`}
-                    >
-                      {isSolved ? '✓ Solved' : problem.difficulty}
-                    </span>
+                      <span
+                        className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
+                          isSolved 
+                            ? 'text-emerald-300 bg-emerald-500/15 border-emerald-500/40' 
+                            : getDifficultyBadge(problem.difficulty)
+                        }`}
+                      >
+                        {isSolved ? '✓ Solved' : problem.difficulty}
+                      </span>
+                    </div>
 
                     <button
-                      className="p-2 rounded-lg text-slate-400 group-hover:text-emerald-400 group-hover:bg-slate-800 transition"
+                      className="p-1.5 sm:p-2 rounded-lg text-slate-400 group-hover:text-emerald-400 group-hover:bg-slate-800 transition flex items-center gap-1 text-xs"
                       title="Solve in Workspace"
                     >
-                      <ChevronRight className="w-5 h-5" />
+                      <span className="sm:hidden text-emerald-400 font-semibold text-[11px]">Solve</span>
+                      <ChevronRight className="w-4 h-4 sm:w-5 sm:h-5" />
                     </button>
                   </div>
                 </div>

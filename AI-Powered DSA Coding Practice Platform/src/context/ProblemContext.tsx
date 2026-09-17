@@ -8,11 +8,10 @@ import {
   sortProblemsSerially, 
   getProblemBook, 
   getStoredStatusMap,
+  setRuntimeStatus,
   savedCodeService,
   resolveCanonicalProblemId,
-  safeLocalStorageSet,
-  getUserScopedKey,
-  LOCAL_STATUS_KEY
+  getUserScopedKey
 } from '../lib/supabase';
 import { ALL_PROBLEMS } from '../lib/allProblems';
 import { evaluateCodeAgainstTestCases, ExecutionResult } from '../lib/codeExecution';
@@ -194,9 +193,7 @@ export const ProblemProvider: React.FC<{ children: React.ReactNode }> = ({ child
           (typeof newSub.test_cases_passed === 'number' && typeof newSub.total_test_cases === 'number' && newSub.total_test_cases > 0 && newSub.test_cases_passed === newSub.total_test_cases);
 
         if (isAccepted) {
-          const statusMap = getStoredStatusMap(user?.id);
-          statusMap[canonicalId] = 'solved';
-          safeLocalStorageSet(getUserScopedKey(LOCAL_STATUS_KEY, user?.id), JSON.stringify(statusMap));
+          setRuntimeStatus(canonicalId, 'solved', user?.id);
 
           setProblems((prev) =>
             prev.map((p) => (p.id === canonicalId ? { ...p, status: 'solved' } : p))
@@ -429,8 +426,9 @@ export const ProblemProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       } else {
         // Standard Mode:
+        const canonicalId = resolveCanonicalProblemId(activeProblem.id);
         const currentStatusMap = getStoredStatusMap(user?.id);
-        const wasAlreadySolved = activeProblem.status === 'solved' || currentStatusMap[activeProblem.id] === 'solved';
+        const wasAlreadySolved = activeProblem.status === 'solved' || currentStatusMap[canonicalId] === 'solved' || currentStatusMap[activeProblem.id] === 'solved';
 
         // Always save latest code to local persistent cache
         savedCodeService.saveCodeSync(activeProblem.id, language, currentCode, user?.id || null);
@@ -438,6 +436,9 @@ export const ProblemProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (isAccepted) {
           if (!wasAlreadySolved) {
             // First time solving: save to Supabase code_submissions and update stats
+            setRuntimeStatus(canonicalId, 'solved', user?.id);
+            setRuntimeStatus(activeProblem.id, 'solved', user?.id);
+
             await submissionService.saveSubmission({
               problem_id: activeProblem.id,
               user_id: user?.id || null,
@@ -450,7 +451,6 @@ export const ProblemProvider: React.FC<{ children: React.ReactNode }> = ({ child
               is_autosave: false,
             }, user?.id || null);
 
-            await problemService.updateProblemStatus(activeProblem.id, 'solved', activeProblem, user?.id || null);
             await userStatsService.recordProblemSolved(activeProblem.difficulty, {
               isRevision: false,
               problemId: activeProblem.id,
@@ -460,7 +460,7 @@ export const ProblemProvider: React.FC<{ children: React.ReactNode }> = ({ child
             
             setActiveProblemState((prev) => (prev ? { ...prev, status: 'solved' } : null));
             setProblems((prev) =>
-              prev.map((p) => (p.id === activeProblem.id ? { ...p, status: 'solved' } : p))
+              prev.map((p) => (p.id === canonicalId || p.id === activeProblem.id ? { ...p, status: 'solved' } : p))
             );
 
             confetti({

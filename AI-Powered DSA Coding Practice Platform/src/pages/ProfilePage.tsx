@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useProblem } from '../context/ProblemContext';
 import { useAuth } from '../context/AuthContext';
-import { userProfileService, userStatsService, submissionService, resetAllRegisteredUsersData, UserProfile, UserStats } from '../lib/supabase';
+import { userProfileService, userStatsService, submissionService, resolveCanonicalProblemId, UserProfile, UserStats } from '../lib/supabase';
 import { Problem, CodeSubmission } from '../types/problem';
 import { 
   User, 
@@ -20,8 +20,7 @@ import {
   BookOpen, 
   Github, 
   School, 
-  Zap, 
-  RotateCcw
+  Zap
 } from 'lucide-react';
 
 interface ProfilePageProps {
@@ -65,26 +64,6 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onSelectProblem }) => 
     return () => window.removeEventListener('codetutor_status_synced', updateData);
   }, [user?.id]);
 
-  const [isResetting, setIsResetting] = useState(false);
-  const [resetMessage, setResetMessage] = useState<string | null>(null);
-
-  const handleResetAll = async () => {
-    if (!window.confirm('Are you sure you want to reset all progress, solved questions, streaks, and XP to 0? This will start everything fresh from 0.')) {
-      return;
-    }
-    setIsResetting(true);
-    try {
-      const res = await resetAllRegisteredUsersData();
-      setResetMessage(res.message);
-      setTimeout(() => setResetMessage(null), 4000);
-      const s = await userStatsService.getStats(user?.id || null);
-      setStats(s);
-      setRecentSubmissions([]);
-    } finally {
-      setIsResetting(false);
-    }
-  };
-
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     const updated = userProfileService.saveProfile(editForm, user?.id || null);
@@ -99,70 +78,100 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onSelectProblem }) => 
     return found ? found.emoji : '👨‍💻';
   };
 
-  const totalProblemsCount = problems.length || 500;
+  const isProblemSolved = (p: Problem) => {
+    if (p.status === 'solved') return true;
+    if (stats?.solved_problem_ids) {
+      if (stats.solved_problem_ids.includes(p.id)) return true;
+      const canonical = resolveCanonicalProblemId(p.id);
+      if (canonical && stats.solved_problem_ids.includes(canonical)) return true;
+    }
+    return false;
+  };
+
+  const totalProblemsCount = problems.length || 5200;
   const easyTotal = problems.filter((p) => p.difficulty === 'Easy').length || 1;
   const mediumTotal = problems.filter((p) => p.difficulty === 'Medium').length || 1;
   const hardTotal = problems.filter((p) => p.difficulty === 'Hard').length || 1;
 
-  const easySolved = problems.filter((p) => p.difficulty === 'Easy' && p.status === 'solved').length;
-  const mediumSolved = problems.filter((p) => p.difficulty === 'Medium' && p.status === 'solved').length;
-  const hardSolved = problems.filter((p) => p.difficulty === 'Hard' && p.status === 'solved').length;
-  const totalSolved = easySolved + mediumSolved + hardSolved;
+  // Accurately compute solved metrics combining verified stats and problem list
+  const easySolved = Math.max(
+    problems.filter((p) => p.difficulty === 'Easy' && isProblemSolved(p)).length,
+    stats?.easy_solved || 0
+  );
+  const mediumSolved = Math.max(
+    problems.filter((p) => p.difficulty === 'Medium' && isProblemSolved(p)).length,
+    stats?.medium_solved || 0
+  );
+  const hardSolved = Math.max(
+    problems.filter((p) => p.difficulty === 'Hard' && isProblemSolved(p)).length,
+    stats?.hard_solved || 0
+  );
+  const totalSolved = Math.max(
+    problems.filter(isProblemSolved).length,
+    easySolved + mediumSolved + hardSolved,
+    stats?.total_solved || 0
+  );
+
+  const displayStreak = totalSolved > 0 ? Math.max(stats?.current_streak || 1, 1) : 0;
+  const displayBestStreak = totalSolved > 0 ? Math.max(stats?.best_streak || 0, displayStreak) : 0;
+  const displayXP = totalSolved > 0
+    ? Math.max(stats?.total_xp || 0, (easySolved * 10) + (mediumSolved * 25) + (hardSolved * 50) + (displayStreak * 15) + (stats?.revision_bonus_xp || 0))
+    : (stats?.revision_bonus_xp || 0);
 
   // Topic Breakdown counts (52 Modules)
   const books = [
-    { key: 'patterns', label: 'Patterns & Matrices', count: problems.filter((p) => p.book === 'patterns').length || 1, solved: problems.filter((p) => p.book === 'patterns' && p.status === 'solved').length },
-    { key: 'loops', label: 'Loops & Iterations', count: problems.filter((p) => p.book === 'loops').length || 1, solved: problems.filter((p) => p.book === 'loops' && p.status === 'solved').length },
-    { key: 'variables', label: 'Variables & Logic', count: problems.filter((p) => p.book === 'variables').length || 1, solved: problems.filter((p) => p.book === 'variables' && p.status === 'solved').length },
-    { key: 'datatypes', label: 'Data Types & Memory', count: problems.filter((p) => p.book === 'datatypes').length || 1, solved: problems.filter((p) => p.book === 'datatypes' && p.status === 'solved').length },
-    { key: 'userinput', label: 'User Input & Streams', count: problems.filter((p) => p.book === 'userinput').length || 1, solved: problems.filter((p) => p.book === 'userinput' && p.status === 'solved').length },
-    { key: 'operators', label: 'Operators & Expressions', count: problems.filter((p) => p.book === 'operators').length || 1, solved: problems.filter((p) => p.book === 'operators' && p.status === 'solved').length },
-    { key: 'strings', label: 'Strings & Text Analysis', count: problems.filter((p) => p.book === 'strings').length || 1, solved: problems.filter((p) => p.book === 'strings' && p.status === 'solved').length },
-    { key: 'math', label: 'Math & <cmath> Mastery', count: problems.filter((p) => p.book === 'math').length || 1, solved: problems.filter((p) => p.book === 'math' && p.status === 'solved').length },
-    { key: 'booleans', label: 'Booleans & Logic Gates', count: problems.filter((p) => p.book === 'booleans').length || 1, solved: problems.filter((p) => p.book === 'booleans' && p.status === 'solved').length },
-    { key: 'ifelse', label: 'If...Else Branching', count: problems.filter((p) => p.book === 'ifelse').length || 1, solved: problems.filter((p) => p.book === 'ifelse' && p.status === 'solved').length },
-    { key: 'switch', label: 'Switch & Menu Systems', count: problems.filter((p) => p.book === 'switch').length || 1, solved: problems.filter((p) => p.book === 'switch' && p.status === 'solved').length },
-    { key: 'whileloop', label: 'While Loop & Number Algorithms', count: problems.filter((p) => p.book === 'whileloop').length || 1, solved: problems.filter((p) => p.book === 'whileloop' && p.status === 'solved').length },
-    { key: 'forloop', label: 'For Loop & Array Algorithms', count: problems.filter((p) => p.book === 'forloop').length || 1, solved: problems.filter((p) => p.book === 'forloop' && p.status === 'solved').length },
-    { key: 'breakcontinue', label: 'Break, Continue & Flow', count: problems.filter((p) => p.book === 'breakcontinue').length || 1, solved: problems.filter((p) => p.book === 'breakcontinue' && p.status === 'solved').length },
-    { key: 'arrays', label: 'Arrays & 2D Matrices', count: problems.filter((p) => p.book === 'arrays').length || 1, solved: problems.filter((p) => p.book === 'arrays' && p.status === 'solved').length },
-    { key: 'structures', label: 'Structures & Data Models', count: problems.filter((p) => p.book === 'structures').length || 1, solved: problems.filter((p) => p.book === 'structures' && p.status === 'solved').length },
-    { key: 'enums', label: 'Enums & Type Safety', count: problems.filter((p) => p.book === 'enums').length || 1, solved: problems.filter((p) => p.book === 'enums' && p.status === 'solved').length },
-    { key: 'references', label: 'References & Aliasing', count: problems.filter((p) => p.book === 'references').length || 1, solved: problems.filter((p) => p.book === 'references' && p.status === 'solved').length },
-    { key: 'pointers', label: 'Pointers & Dynamic Memory', count: problems.filter((p) => p.book === 'pointers').length || 1, solved: problems.filter((p) => p.book === 'pointers' && p.status === 'solved').length },
-    { key: 'memorymgmt', label: 'Memory Mgmt (new/delete)', count: problems.filter((p) => p.book === 'memorymgmt').length || 1, solved: problems.filter((p) => p.book === 'memorymgmt' && p.status === 'solved').length },
-    { key: 'functions', label: 'Functions & Modular Design', count: problems.filter((p) => p.book === 'functions').length || 1, solved: problems.filter((p) => p.book === 'functions' && p.status === 'solved').length },
-    { key: 'funcparams', label: 'Function Parameters & Return', count: problems.filter((p) => p.book === 'funcparams').length || 1, solved: problems.filter((p) => p.book === 'funcparams' && p.status === 'solved').length },
-    { key: 'funcoverloading', label: 'Function Overloading', count: problems.filter((p) => p.book === 'funcoverloading').length || 1, solved: problems.filter((p) => p.book === 'funcoverloading' && p.status === 'solved').length },
-    { key: 'scope', label: 'Scope & Variable Lifetime', count: problems.filter((p) => p.book === 'scope').length || 1, solved: problems.filter((p) => p.book === 'scope' && p.status === 'solved').length },
-    { key: 'recursion', label: 'Recursion & Call Stack', count: problems.filter((p) => p.book === 'recursion').length || 1, solved: problems.filter((p) => p.book === 'recursion' && p.status === 'solved').length },
-    { key: 'lambda', label: 'Lambda Expressions & Closures', count: problems.filter((p) => p.book === 'lambda').length || 1, solved: problems.filter((p) => p.book === 'lambda' && p.status === 'solved').length },
-    { key: 'cppoop', label: 'C++ OOP Principles & Modeling', count: problems.filter((p) => p.book === 'cppoop').length || 1, solved: problems.filter((p) => p.book === 'cppoop' && p.status === 'solved').length },
-    { key: 'classesobjects', label: 'Classes & Objects Instantiation', count: problems.filter((p) => p.book === 'classesobjects').length || 1, solved: problems.filter((p) => p.book === 'classesobjects' && p.status === 'solved').length },
-    { key: 'classmethods', label: 'Class Methods & Member Functions', count: problems.filter((p) => p.book === 'classmethods').length || 1, solved: problems.filter((p) => p.book === 'classmethods' && p.status === 'solved').length },
-    { key: 'constructors', label: 'Constructors, RAII & Destructors', count: problems.filter((p) => p.book === 'constructors').length || 1, solved: problems.filter((p) => p.book === 'constructors' && p.status === 'solved').length },
-    { key: 'accessspecifiers', label: 'Access Specifiers (public/private)', count: problems.filter((p) => p.book === 'accessspecifiers').length || 1, solved: problems.filter((p) => p.book === 'accessspecifiers' && p.status === 'solved').length },
-    { key: 'encapsulation', label: 'Encapsulation & Data Invariants', count: problems.filter((p) => p.book === 'encapsulation').length || 1, solved: problems.filter((p) => p.book === 'encapsulation' && p.status === 'solved').length },
-    { key: 'friendfunctions', label: 'Friend Functions & Friend Classes', count: problems.filter((p) => p.book === 'friendfunctions').length || 1, solved: problems.filter((p) => p.book === 'friendfunctions' && p.status === 'solved').length },
-    { key: 'inheritance', label: 'Inheritance & Class Hierarchies', count: problems.filter((p) => p.book === 'inheritance').length || 1, solved: problems.filter((p) => p.book === 'inheritance' && p.status === 'solved').length },
-    { key: 'polymorphism', label: 'Polymorphism & Operator Overload', count: problems.filter((p) => p.book === 'polymorphism').length || 1, solved: problems.filter((p) => p.book === 'polymorphism' && p.status === 'solved').length },
-    { key: 'templates', label: 'Templates & Generic Programming', count: problems.filter((p) => p.book === 'templates').length || 1, solved: problems.filter((p) => p.book === 'templates' && p.status === 'solved').length },
-    { key: 'files', label: 'File I/O Streams (<fstream>)', count: problems.filter((p) => p.book === 'files').length || 1, solved: problems.filter((p) => p.book === 'files' && p.status === 'solved').length },
-    { key: 'cppdate', label: 'Date, Time & <chrono> Engine', count: problems.filter((p) => p.book === 'cppdate').length || 1, solved: problems.filter((p) => p.book === 'cppdate' && p.status === 'solved').length },
-    { key: 'cpperrors', label: 'C++ Errors & Compilation', count: problems.filter((p) => p.book === 'cpperrors').length || 1, solved: problems.filter((p) => p.book === 'cpperrors' && p.status === 'solved').length },
-    { key: 'cppdebugging', label: 'C++ Debugging & Diagnosis', count: problems.filter((p) => p.book === 'cppdebugging').length || 1, solved: problems.filter((p) => p.book === 'cppdebugging' && p.status === 'solved').length },
-    { key: 'cppexceptions', label: 'C++ Exceptions & Error Handling', count: problems.filter((p) => p.book === 'cppexceptions').length || 1, solved: problems.filter((p) => p.book === 'cppexceptions' && p.status === 'solved').length },
-    { key: 'inputvalidation', label: 'Input Validation & Guard Rails', count: problems.filter((p) => p.book === 'inputvalidation').length || 1, solved: problems.filter((p) => p.book === 'inputvalidation' && p.status === 'solved').length },
-    { key: 'datastructuresstl', label: 'Data Structures & STL Basics', count: problems.filter((p) => p.book === 'datastructuresstl').length || 1, solved: problems.filter((p) => p.book === 'datastructuresstl' && p.status === 'solved').length },
-    { key: 'vectors', label: 'C++ Vectors & Dynamic Arrays', count: problems.filter((p) => p.book === 'vectors').length || 1, solved: problems.filter((p) => p.book === 'vectors' && p.status === 'solved').length },
-    { key: 'cpplist', label: 'C++ Doubly Linked Lists (std::list)', count: problems.filter((p) => p.book === 'cpplist').length || 1, solved: problems.filter((p) => p.book === 'cpplist' && p.status === 'solved').length },
-    { key: 'stacks', label: 'C++ Stacks (std::stack / LIFO)', count: problems.filter((p) => p.book === 'stacks').length || 1, solved: problems.filter((p) => p.book === 'stacks' && p.status === 'solved').length },
-    { key: 'queues', label: 'C++ Queues (std::queue / FIFO)', count: problems.filter((p) => p.book === 'queues').length || 1, solved: problems.filter((p) => p.book === 'queues' && p.status === 'solved').length },
-    { key: 'cppdeque', label: 'C++ Double-Ended Queues (std::deque)', count: problems.filter((p) => p.book === 'cppdeque').length || 1, solved: problems.filter((p) => p.book === 'cppdeque' && p.status === 'solved').length },
-    { key: 'sets', label: 'C++ Sets & Ordered/Unordered Sets', count: problems.filter((p) => p.book === 'sets').length || 1, solved: problems.filter((p) => p.book === 'sets' && p.status === 'solved').length },
-    { key: 'maps', label: 'C++ Maps & Key-Value Lookup', count: problems.filter((p) => p.book === 'maps').length || 1, solved: problems.filter((p) => p.book === 'maps' && p.status === 'solved').length },
-    { key: 'iterators', label: 'C++ Iterators & Pointer Traversal', count: problems.filter((p) => p.book === 'iterators').length || 1, solved: problems.filter((p) => p.book === 'iterators' && p.status === 'solved').length },
-    { key: 'algorithms', label: 'C++ STL Algorithms (<algorithm>)', count: problems.filter((p) => p.book === 'algorithms').length || 1, solved: problems.filter((p) => p.book === 'algorithms' && p.status === 'solved').length },
+    { key: 'patterns', label: 'Patterns & Matrices', count: problems.filter((p) => p.book === 'patterns').length || 1, solved: problems.filter((p) => p.book === 'patterns' && isProblemSolved(p)).length },
+    { key: 'loops', label: 'Loops & Iterations', count: problems.filter((p) => p.book === 'loops').length || 1, solved: problems.filter((p) => p.book === 'loops' && isProblemSolved(p)).length },
+    { key: 'variables', label: 'Variables & Logic', count: problems.filter((p) => p.book === 'variables').length || 1, solved: problems.filter((p) => p.book === 'variables' && isProblemSolved(p)).length },
+    { key: 'datatypes', label: 'Data Types & Memory', count: problems.filter((p) => p.book === 'datatypes').length || 1, solved: problems.filter((p) => p.book === 'datatypes' && isProblemSolved(p)).length },
+    { key: 'userinput', label: 'User Input & Streams', count: problems.filter((p) => p.book === 'userinput').length || 1, solved: problems.filter((p) => p.book === 'userinput' && isProblemSolved(p)).length },
+    { key: 'operators', label: 'Operators & Expressions', count: problems.filter((p) => p.book === 'operators').length || 1, solved: problems.filter((p) => p.book === 'operators' && isProblemSolved(p)).length },
+    { key: 'strings', label: 'Strings & Text Analysis', count: problems.filter((p) => p.book === 'strings').length || 1, solved: problems.filter((p) => p.book === 'strings' && isProblemSolved(p)).length },
+    { key: 'math', label: 'Math & <cmath> Mastery', count: problems.filter((p) => p.book === 'math').length || 1, solved: problems.filter((p) => p.book === 'math' && isProblemSolved(p)).length },
+    { key: 'booleans', label: 'Booleans & Logic Gates', count: problems.filter((p) => p.book === 'booleans').length || 1, solved: problems.filter((p) => p.book === 'booleans' && isProblemSolved(p)).length },
+    { key: 'ifelse', label: 'If...Else Branching', count: problems.filter((p) => p.book === 'ifelse').length || 1, solved: problems.filter((p) => p.book === 'ifelse' && isProblemSolved(p)).length },
+    { key: 'switch', label: 'Switch & Menu Systems', count: problems.filter((p) => p.book === 'switch').length || 1, solved: problems.filter((p) => p.book === 'switch' && isProblemSolved(p)).length },
+    { key: 'whileloop', label: 'While Loop & Number Algorithms', count: problems.filter((p) => p.book === 'whileloop').length || 1, solved: problems.filter((p) => p.book === 'whileloop' && isProblemSolved(p)).length },
+    { key: 'forloop', label: 'For Loop & Array Algorithms', count: problems.filter((p) => p.book === 'forloop').length || 1, solved: problems.filter((p) => p.book === 'forloop' && isProblemSolved(p)).length },
+    { key: 'breakcontinue', label: 'Break, Continue & Flow', count: problems.filter((p) => p.book === 'breakcontinue').length || 1, solved: problems.filter((p) => p.book === 'breakcontinue' && isProblemSolved(p)).length },
+    { key: 'arrays', label: 'Arrays & 2D Matrices', count: problems.filter((p) => p.book === 'arrays').length || 1, solved: problems.filter((p) => p.book === 'arrays' && isProblemSolved(p)).length },
+    { key: 'structures', label: 'Structures & Data Models', count: problems.filter((p) => p.book === 'structures').length || 1, solved: problems.filter((p) => p.book === 'structures' && isProblemSolved(p)).length },
+    { key: 'enums', label: 'Enums & Type Safety', count: problems.filter((p) => p.book === 'enums').length || 1, solved: problems.filter((p) => p.book === 'enums' && isProblemSolved(p)).length },
+    { key: 'references', label: 'References & Aliasing', count: problems.filter((p) => p.book === 'references').length || 1, solved: problems.filter((p) => p.book === 'references' && isProblemSolved(p)).length },
+    { key: 'pointers', label: 'Pointers & Dynamic Memory', count: problems.filter((p) => p.book === 'pointers').length || 1, solved: problems.filter((p) => p.book === 'pointers' && isProblemSolved(p)).length },
+    { key: 'memorymgmt', label: 'Memory Mgmt (new/delete)', count: problems.filter((p) => p.book === 'memorymgmt').length || 1, solved: problems.filter((p) => p.book === 'memorymgmt' && isProblemSolved(p)).length },
+    { key: 'functions', label: 'Functions & Modular Design', count: problems.filter((p) => p.book === 'functions').length || 1, solved: problems.filter((p) => p.book === 'functions' && isProblemSolved(p)).length },
+    { key: 'funcparams', label: 'Function Parameters & Return', count: problems.filter((p) => p.book === 'funcparams').length || 1, solved: problems.filter((p) => p.book === 'funcparams' && isProblemSolved(p)).length },
+    { key: 'funcoverloading', label: 'Function Overloading', count: problems.filter((p) => p.book === 'funcoverloading').length || 1, solved: problems.filter((p) => p.book === 'funcoverloading' && isProblemSolved(p)).length },
+    { key: 'scope', label: 'Scope & Variable Lifetime', count: problems.filter((p) => p.book === 'scope').length || 1, solved: problems.filter((p) => p.book === 'scope' && isProblemSolved(p)).length },
+    { key: 'recursion', label: 'Recursion & Call Stack', count: problems.filter((p) => p.book === 'recursion').length || 1, solved: problems.filter((p) => p.book === 'recursion' && isProblemSolved(p)).length },
+    { key: 'lambda', label: 'Lambda Expressions & Closures', count: problems.filter((p) => p.book === 'lambda').length || 1, solved: problems.filter((p) => p.book === 'lambda' && isProblemSolved(p)).length },
+    { key: 'cppoop', label: 'C++ OOP Principles & Modeling', count: problems.filter((p) => p.book === 'cppoop').length || 1, solved: problems.filter((p) => p.book === 'cppoop' && isProblemSolved(p)).length },
+    { key: 'classesobjects', label: 'Classes & Objects Instantiation', count: problems.filter((p) => p.book === 'classesobjects').length || 1, solved: problems.filter((p) => p.book === 'classesobjects' && isProblemSolved(p)).length },
+    { key: 'classmethods', label: 'Class Methods & Member Functions', count: problems.filter((p) => p.book === 'classmethods').length || 1, solved: problems.filter((p) => p.book === 'classmethods' && isProblemSolved(p)).length },
+    { key: 'constructors', label: 'Constructors, RAII & Destructors', count: problems.filter((p) => p.book === 'constructors').length || 1, solved: problems.filter((p) => p.book === 'constructors' && isProblemSolved(p)).length },
+    { key: 'accessspecifiers', label: 'Access Specifiers (public/private)', count: problems.filter((p) => p.book === 'accessspecifiers').length || 1, solved: problems.filter((p) => p.book === 'accessspecifiers' && isProblemSolved(p)).length },
+    { key: 'encapsulation', label: 'Encapsulation & Data Invariants', count: problems.filter((p) => p.book === 'encapsulation').length || 1, solved: problems.filter((p) => p.book === 'encapsulation' && isProblemSolved(p)).length },
+    { key: 'friendfunctions', label: 'Friend Functions & Friend Classes', count: problems.filter((p) => p.book === 'friendfunctions').length || 1, solved: problems.filter((p) => p.book === 'friendfunctions' && isProblemSolved(p)).length },
+    { key: 'inheritance', label: 'Inheritance & Class Hierarchies', count: problems.filter((p) => p.book === 'inheritance').length || 1, solved: problems.filter((p) => p.book === 'inheritance' && isProblemSolved(p)).length },
+    { key: 'polymorphism', label: 'Polymorphism & Operator Overload', count: problems.filter((p) => p.book === 'polymorphism').length || 1, solved: problems.filter((p) => p.book === 'polymorphism' && isProblemSolved(p)).length },
+    { key: 'templates', label: 'Templates & Generic Programming', count: problems.filter((p) => p.book === 'templates').length || 1, solved: problems.filter((p) => p.book === 'templates' && isProblemSolved(p)).length },
+    { key: 'files', label: 'File I/O Streams (<fstream>)', count: problems.filter((p) => p.book === 'files').length || 1, solved: problems.filter((p) => p.book === 'files' && isProblemSolved(p)).length },
+    { key: 'cppdate', label: 'Date, Time & <chrono> Engine', count: problems.filter((p) => p.book === 'cppdate').length || 1, solved: problems.filter((p) => p.book === 'cppdate' && isProblemSolved(p)).length },
+    { key: 'cpperrors', label: 'C++ Errors & Compilation', count: problems.filter((p) => p.book === 'cpperrors').length || 1, solved: problems.filter((p) => p.book === 'cpperrors' && isProblemSolved(p)).length },
+    { key: 'cppdebugging', label: 'C++ Debugging & Diagnosis', count: problems.filter((p) => p.book === 'cppdebugging').length || 1, solved: problems.filter((p) => p.book === 'cppdebugging' && isProblemSolved(p)).length },
+    { key: 'cppexceptions', label: 'C++ Exceptions & Error Handling', count: problems.filter((p) => p.book === 'cppexceptions').length || 1, solved: problems.filter((p) => p.book === 'cppexceptions' && isProblemSolved(p)).length },
+    { key: 'inputvalidation', label: 'Input Validation & Guard Rails', count: problems.filter((p) => p.book === 'inputvalidation').length || 1, solved: problems.filter((p) => p.book === 'inputvalidation' && isProblemSolved(p)).length },
+    { key: 'datastructuresstl', label: 'Data Structures & STL Basics', count: problems.filter((p) => p.book === 'datastructuresstl').length || 1, solved: problems.filter((p) => p.book === 'datastructuresstl' && isProblemSolved(p)).length },
+    { key: 'vectors', label: 'C++ Vectors & Dynamic Arrays', count: problems.filter((p) => p.book === 'vectors').length || 1, solved: problems.filter((p) => p.book === 'vectors' && isProblemSolved(p)).length },
+    { key: 'cpplist', label: 'C++ Doubly Linked Lists (std::list)', count: problems.filter((p) => p.book === 'cpplist').length || 1, solved: problems.filter((p) => p.book === 'cpplist' && isProblemSolved(p)).length },
+    { key: 'stacks', label: 'C++ Stacks (std::stack / LIFO)', count: problems.filter((p) => p.book === 'stacks').length || 1, solved: problems.filter((p) => p.book === 'stacks' && isProblemSolved(p)).length },
+    { key: 'queues', label: 'C++ Queues (std::queue / FIFO)', count: problems.filter((p) => p.book === 'queues').length || 1, solved: problems.filter((p) => p.book === 'queues' && isProblemSolved(p)).length },
+    { key: 'cppdeque', label: 'C++ Double-Ended Queues (std::deque)', count: problems.filter((p) => p.book === 'cppdeque').length || 1, solved: problems.filter((p) => p.book === 'cppdeque' && isProblemSolved(p)).length },
+    { key: 'sets', label: 'C++ Sets & Ordered/Unordered Sets', count: problems.filter((p) => p.book === 'sets').length || 1, solved: problems.filter((p) => p.book === 'sets' && isProblemSolved(p)).length },
+    { key: 'maps', label: 'C++ Maps & Key-Value Lookup', count: problems.filter((p) => p.book === 'maps').length || 1, solved: problems.filter((p) => p.book === 'maps' && isProblemSolved(p)).length },
+    { key: 'iterators', label: 'C++ Iterators & Pointer Traversal', count: problems.filter((p) => p.book === 'iterators').length || 1, solved: problems.filter((p) => p.book === 'iterators' && isProblemSolved(p)).length },
+    { key: 'algorithms', label: 'C++ STL Algorithms (<algorithm>)', count: problems.filter((p) => p.book === 'algorithms').length || 1, solved: problems.filter((p) => p.book === 'algorithms' && isProblemSolved(p)).length },
   ];
 
   // Generate last 14 days activity list for streak calendar visualization
@@ -171,17 +180,17 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onSelectProblem }) => 
     d.setDate(d.getDate() - (13 - i));
     const dateStr = d.toISOString().split('T')[0];
     const dayName = d.toLocaleDateString('en-US', { weekday: 'narrow' });
-    const isActive = stats?.active_dates?.includes(dateStr) || (i === 13 && (stats?.current_streak || 0) > 0);
+    const isActive = stats?.active_dates?.includes(dateStr) || (i === 13 && displayStreak > 0);
     return { dateStr, dayName, isActive };
   });
 
-  const masteryRank = (stats?.total_xp || 0) >= 5000 
+  const masteryRank = displayXP >= 5000 
     ? 'Grandmaster 🏆' 
-    : (stats?.total_xp || 0) >= 2500 
+    : displayXP >= 2500 
     ? 'Knight 🛡️' 
-    : (stats?.total_xp || 0) >= 1000 
+    : displayXP >= 1000 
     ? 'Expert 🌟' 
-    : (stats?.total_xp || 0) >= 300 
+    : displayXP >= 300 
     ? 'Aspirant 🚀' 
     : 'Novice 🌱';
 
@@ -237,29 +246,14 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onSelectProblem }) => 
             </div>
           </div>
 
-          {/* Action Buttons: Reset All & Edit Profile */}
+          {/* Action Buttons: Edit Profile */}
           <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
             {savedSuccess && (
               <span className="text-xs text-emerald-400 font-medium flex items-center gap-1">
                 <Check className="w-4 h-4" /> Profile Updated!
               </span>
             )}
-            {resetMessage && (
-              <span className="text-xs text-amber-400 font-medium flex items-center gap-1 animate-fadeIn">
-                <Check className="w-4 h-4" /> {resetMessage}
-              </span>
-            )}
             
-            <button
-              onClick={handleResetAll}
-              disabled={isResetting}
-              title="Reset all progress and start fresh from 0"
-              className="w-full sm:w-auto px-3.5 py-2.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
-            >
-              <RotateCcw className={`w-3.5 h-3.5 text-rose-400 ${isResetting ? 'animate-spin' : ''}`} />
-              <span>{isResetting ? 'Resetting...' : 'Reset All to 0'}</span>
-            </button>
-
             <button
               onClick={() => {
                 setEditForm(profile);
@@ -389,11 +383,11 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onSelectProblem }) => 
           <div>
             <div className="text-xs text-slate-400 font-medium">Practice Streak</div>
             <div className="text-2xl font-black text-white flex items-baseline gap-1">
-              <span>{stats?.current_streak || 0}</span>
+              <span>{displayStreak}</span>
               <span className="text-xs font-bold text-amber-400">Days 🔥</span>
             </div>
             <div className="text-[10px] text-slate-500 font-mono mt-0.5">
-              Best Streak: {stats?.best_streak || stats?.current_streak || 0} days
+              Best Streak: {displayBestStreak} days
             </div>
           </div>
         </div>
@@ -406,7 +400,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onSelectProblem }) => 
           <div>
             <div className="text-xs text-slate-400 font-medium">Total XP Points</div>
             <div className="text-2xl font-black text-amber-400">
-              {(stats?.total_xp || 0).toLocaleString()}
+              {displayXP.toLocaleString()}
             </div>
             <div className="text-[10px] text-slate-500 font-mono mt-0.5">
               +{stats?.revision_bonus_xp || 0} Revision Bonus
@@ -544,23 +538,25 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onSelectProblem }) => 
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <BookOpen className="w-4 h-4 text-indigo-400" />
-              Book & Topic Progress
+              52 Modules & Topic Progress
             </h3>
-            <span className="text-xs text-slate-400">5 Curated Books</span>
+            <span className="text-xs text-slate-400 font-mono">52 Modules</span>
           </div>
 
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[460px] overflow-y-auto pr-1">
             {books.map((b) => {
               const pct = Math.min(100, Math.round((b.solved / (b.count || 1)) * 100));
               return (
-                <div key={b.key} className="space-y-1">
+                <div key={b.key} className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium text-slate-300">{b.label}</span>
-                    <span className="font-mono text-slate-400 text-[11px]">{b.solved} / {b.count} ({pct}%)</span>
+                    <span className="font-medium text-slate-300 truncate max-w-[150px]">{b.label}</span>
+                    <span className="font-mono text-emerald-400 text-[11px] font-semibold">{b.solved} / {b.count} ({pct}%)</span>
                   </div>
-                  <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800/80">
+                  <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
                     <div
-                      className="h-full bg-indigo-500 rounded-full transition-all duration-500"
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        pct === 100 ? 'bg-emerald-400' : pct > 0 ? 'bg-indigo-400' : 'bg-slate-700'
+                      }`}
                       style={{ width: `${pct}%` }}
                     />
                   </div>

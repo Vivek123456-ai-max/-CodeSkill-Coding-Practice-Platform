@@ -21,7 +21,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useProblem } from '../../context/ProblemContext';
 import { userStatsService, userProfileService, UserProfile, UserStats } from '../../lib/supabase';
 
-export type PageType = 'workspace' | 'problems' | 'dashboard' | 'revision' | 'leaderboard' | 'profile' | 'battle' | 'store';
+export type PageType = 'workspace' | 'problems' | 'dashboard' | 'revision' | 'leaderboard' | 'profile' | 'battle' | 'store' | 'admin';
 
 interface NavbarProps {
   currentPage: PageType;
@@ -237,7 +237,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         >
           <div className="flex items-center gap-1 text-amber-400 pr-1.5 border-r border-slate-800" title="Daily Streak">
             <Flame className="w-3.5 h-3.5 fill-amber-400/20 text-amber-400" />
-            <span>{stats.current_streak}d</span>
+            <span>{(stats.total_solved > 0 || stats.current_streak > 0) ? Math.max(stats.current_streak, 1) : 0}d</span>
           </div>
           <div className="flex items-center gap-1 text-emerald-400 pl-1" title="Total Solved">
             <CheckCircle2 className="w-3.5 h-3.5" />

@@ -29,8 +29,13 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({ onSelectProblem, o
   const [recentSubmissions, setRecentSubmissions] = useState<CodeSubmission[]>([]);
 
   useEffect(() => {
-    const subs = submissionService.getAllSubmissions(user?.id || null);
-    setRecentSubmissions(subs);
+    const updateSubs = () => {
+      const subs = submissionService.getAllSubmissions(user?.id || null);
+      setRecentSubmissions(subs);
+    };
+    updateSubs();
+    window.addEventListener('codetutor_status_synced', updateSubs);
+    return () => window.removeEventListener('codetutor_status_synced', updateSubs);
   }, [user?.id]);
 
   return (
