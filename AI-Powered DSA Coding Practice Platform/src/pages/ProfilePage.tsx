@@ -112,8 +112,8 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({ onSelectProblem }) => 
     stats?.total_solved || 0
   );
 
-  const displayStreak = totalSolved > 0 ? Math.max(stats?.current_streak || 1, 1) : 0;
-  const displayBestStreak = totalSolved > 0 ? Math.max(stats?.best_streak || 0, displayStreak) : 0;
+  const displayStreak = stats?.current_streak || 0;
+  const displayBestStreak = Math.max(stats?.best_streak || 0, displayStreak);
   const displayXP = totalSolved > 0
     ? Math.max(stats?.total_xp || 0, (easySolved * 10) + (mediumSolved * 25) + (hardSolved * 50) + (displayStreak * 15) + (stats?.revision_bonus_xp || 0))
     : (stats?.revision_bonus_xp || 0);

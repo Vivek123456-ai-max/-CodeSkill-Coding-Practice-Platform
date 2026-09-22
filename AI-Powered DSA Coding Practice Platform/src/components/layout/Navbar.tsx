@@ -237,7 +237,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         >
           <div className="flex items-center gap-1 text-amber-400 pr-1.5 border-r border-slate-800" title="Daily Streak">
             <Flame className="w-3.5 h-3.5 fill-amber-400/20 text-amber-400" />
-            <span>{(stats.total_solved > 0 || stats.current_streak > 0) ? Math.max(stats.current_streak, 1) : 0}d</span>
+            <span>{stats.current_streak || 0}d</span>
           </div>
           <div className="flex items-center gap-1 text-emerald-400 pl-1" title="Total Solved">
             <CheckCircle2 className="w-3.5 h-3.5" />

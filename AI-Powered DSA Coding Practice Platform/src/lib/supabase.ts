@@ -183,18 +183,8 @@ export async function resetAllRegisteredUsersData(): Promise<{ success: boolean;
   }
 }
 
-// Auto-run zero-out check once on initialization if version flag is not set
-export function checkAutoZeroOut() {
-  try {
-    if (typeof window !== 'undefined' && !localStorage.getItem('ai_dsa_reset_zero_v10')) {
-      resetAllRegisteredUsersData();
-    }
-  } catch {}
-}
-
-// Run cleanup & check immediately on load
+// Run cleanup immediately on load
 cleanupBloatedStorage();
-checkAutoZeroOut();
 
 export function safeLocalStorageSet(key: string, value: string) {
   try {
@@ -812,19 +802,21 @@ export const submissionService = {
     const newId = crypto.randomUUID ? crypto.randomUUID() : '00000000-0000-4000-8000-' + Date.now().toString().padStart(12, '0');
     const validUserId = isValidUUID(userId) ? userId : null;
     const canonicalProbId = resolveCanonicalProblemId(submission.problem_id);
-    const validProblemId = isValidUUID(canonicalProbId) 
-      ? canonicalProbId 
-      : (isValidUUID(submission.problem_id) ? submission.problem_id : null);
+    const validProblemId = (canonicalProbId || submission.problem_id || '').trim();
 
     const newSub: CodeSubmission = {
       ...submission,
       id: newId,
+      problem_id: validProblemId || submission.problem_id,
       user_id: validUserId || 'guest_user',
       created_at: new Date().toISOString()
     };
 
     // 1. Instantly save to persistent code cache (0ms lookup)
     savedCodeService.saveCodeSync(newSub.problem_id, newSub.language, newSub.code, userId);
+    if (canonicalProbId && canonicalProbId !== newSub.problem_id) {
+      savedCodeService.saveCodeSync(canonicalProbId, newSub.language, newSub.code, userId);
+    }
 
     // 2. Instantly update in-memory cache
     if (!inMemorySubmissionsCache.has(newSub.problem_id)) {
@@ -832,6 +824,13 @@ export const submissionService = {
     }
     const list = inMemorySubmissionsCache.get(newSub.problem_id)!;
     list.unshift(newSub);
+
+    if (canonicalProbId && canonicalProbId !== newSub.problem_id) {
+      if (!inMemorySubmissionsCache.has(canonicalProbId)) {
+        inMemorySubmissionsCache.set(canonicalProbId, []);
+      }
+      inMemorySubmissionsCache.get(canonicalProbId)!.unshift(newSub);
+    }
 
     // 3. Persist to user-scoped Local Storage backup
     try {
@@ -842,7 +841,7 @@ export const submissionService = {
       safeLocalStorageSet(storageKey, JSON.stringify(submissions.slice(0, 100)));
     } catch {}
 
-    // 4. Save to Supabase Database (strictly prevent duplicate accepted submissions)
+    // 4. Save to Supabase Database (strictly permanent and prevent duplicate accepted submissions)
     try {
       if (validProblemId && validUserId) {
         if (newSub.status === 'accepted') {
@@ -875,6 +874,19 @@ export const submissionService = {
 
         if (insertErr) {
           console.warn('Supabase submission insert retry:', insertErr);
+        }
+
+        // Also save to saved_code table for cross-device code persistence
+        if (newSub.code) {
+          try {
+            await db.from('saved_code').upsert({
+              user_id: validUserId,
+              problem_id: validProblemId,
+              language: newSub.language,
+              code: newSub.code,
+              updated_at: new Date().toISOString()
+            }, { onConflict: 'user_id,problem_id,language' });
+          } catch {}
         }
       }
     } catch (e) {
@@ -1061,6 +1073,90 @@ function getYesterdayDateString(d: Date = new Date()): string {
   return getLocalDateString(yesterday);
 }
 
+export function calculateStreakFromDates(
+  datesList: (string | null | undefined)[],
+  fallbackLastActiveDate?: string | null,
+  fallbackStreak?: number
+): { currentStreak: number; bestStreak: number; lastActiveDate: string; activeDates: string[] } {
+  const today = getLocalDateString();
+  const yesterday = getYesterdayDateString();
+
+  const set = new Set<string>();
+  if (Array.isArray(datesList)) {
+    for (const d of datesList) {
+      if (!d) continue;
+      const dateStr = d.includes('T') ? getLocalDateString(new Date(d)) : d.trim().slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        set.add(dateStr);
+      }
+    }
+  }
+
+  if (fallbackLastActiveDate && /^\d{4}-\d{2}-\d{2}$/.test(fallbackLastActiveDate.trim().slice(0, 10))) {
+    set.add(fallbackLastActiveDate.trim().slice(0, 10));
+  }
+
+  const sortedDates = Array.from(set).sort();
+  if (sortedDates.length === 0) {
+    const defaultStreak = (fallbackStreak && fallbackStreak > 0 && fallbackLastActiveDate === today) ? fallbackStreak : 0;
+    return {
+      currentStreak: defaultStreak,
+      bestStreak: defaultStreak,
+      lastActiveDate: fallbackLastActiveDate || '',
+      activeDates: fallbackLastActiveDate ? [fallbackLastActiveDate] : []
+    };
+  }
+
+  const lastActiveDate = sortedDates[sortedDates.length - 1];
+
+  // 1. Calculate best streak across all sorted historical dates
+  let bestStreak = 1;
+  let runStreak = 1;
+  for (let i = 1; i < sortedDates.length; i++) {
+    const prev = new Date(sortedDates[i - 1] + 'T00:00:00');
+    const curr = new Date(sortedDates[i] + 'T00:00:00');
+    const diffDays = Math.round((curr.getTime() - prev.getTime()) / 86400000);
+    if (diffDays === 1) {
+      runStreak += 1;
+      if (runStreak > bestStreak) bestStreak = runStreak;
+    } else if (diffDays > 1) {
+      runStreak = 1;
+    }
+  }
+
+  // 2. Calculate current streak relative to today/yesterday
+  let currentStreak = 0;
+  if (lastActiveDate === today || lastActiveDate === yesterday) {
+    currentStreak = 1;
+    let anchor = new Date(lastActiveDate + 'T00:00:00');
+    for (let i = sortedDates.length - 2; i >= 0; i--) {
+      const prev = new Date(sortedDates[i] + 'T00:00:00');
+      const diffDays = Math.round((anchor.getTime() - prev.getTime()) / 86400000);
+      if (diffDays === 1) {
+        currentStreak += 1;
+        anchor = prev;
+      } else if (diffDays > 1) {
+        break;
+      }
+    }
+  } else {
+    // Last activity was 2 or more days ago: streak broken!
+    currentStreak = 0;
+  }
+
+  if (fallbackStreak && fallbackStreak > currentStreak && (lastActiveDate === today || lastActiveDate === yesterday)) {
+    currentStreak = fallbackStreak;
+  }
+  bestStreak = Math.max(bestStreak, currentStreak);
+
+  return {
+    currentStreak,
+    bestStreak,
+    lastActiveDate,
+    activeDates: sortedDates
+  };
+}
+
 export const userProfileService = {
   getProfile(userId?: string | null): UserProfile {
     try {
@@ -1115,11 +1211,12 @@ export const userProfileService = {
       let dbSubmissionsMedium = 0;
       let dbSubmissionsHard = 0;
       const solvedIds = new Set<string>();
+      const userSubmissionDates: string[] = [];
 
       try {
         const { data: userSubs } = await db
           .from('code_submissions')
-          .select('id, problem_id, language, code, status, test_cases_passed, total_test_cases')
+          .select('id, problem_id, language, code, status, test_cases_passed, total_test_cases, created_at')
           .eq('user_id', user.id);
 
         if (userSubs && Array.isArray(userSubs)) {
@@ -1132,6 +1229,9 @@ export const userProfileService = {
               (typeof s.test_cases_passed === 'number' && typeof s.total_test_cases === 'number' && s.total_test_cases > 0 && s.test_cases_passed === s.total_test_cases);
             if (isAccepted && canonicalId) {
               solvedIds.add(canonicalId);
+              if (s.created_at) {
+                userSubmissionDates.push(s.created_at);
+              }
             }
           });
         }
@@ -1167,10 +1267,22 @@ export const userProfileService = {
       const medium_solved = dbSubmissionsMedium;
       const hard_solved = dbSubmissionsHard;
       const total_solved = solvedIds.size;
-      const current_streak = total_solved > 0 ? Math.max(statsRow?.current_streak || profileRow?.current_streak || 1, 1) : 0;
-      const best_streak = Math.max(statsRow?.best_streak || 0, profileRow?.current_streak || 0, current_streak);
-      const last_active_date = total_solved > 0 ? (statsRow?.last_active_date || profileRow?.last_active_date || getLocalDateString()) : '';
-      const total_xp = total_solved > 0 ? (easy_solved * 10) + (medium_solved * 25) + (hard_solved * 50) + (current_streak * 15) + (statsRow?.revision_bonus_xp || 0) : (statsRow?.revision_bonus_xp || 0);
+
+      if (statsRow?.last_active_date) userSubmissionDates.push(statsRow.last_active_date);
+      if (profileRow?.last_active_date) userSubmissionDates.push(profileRow.last_active_date);
+
+      const streakInfo = calculateStreakFromDates(
+        userSubmissionDates,
+        statsRow?.last_active_date || profileRow?.last_active_date,
+        statsRow?.current_streak || profileRow?.current_streak
+      );
+
+      const current_streak = total_solved > 0 ? streakInfo.currentStreak : 0;
+      const best_streak = Math.max(streakInfo.bestStreak, statsRow?.best_streak || 0, current_streak);
+      const last_active_date = total_solved > 0 ? streakInfo.lastActiveDate : '';
+      const total_xp = total_solved > 0 
+        ? (easy_solved * 10) + (medium_solved * 25) + (hard_solved * 50) + (current_streak * 15) + (statsRow?.revision_bonus_xp || 0) 
+        : (statsRow?.revision_bonus_xp || 0);
 
       const userStats: UserStats = {
         easy_solved,
@@ -1180,7 +1292,7 @@ export const userProfileService = {
         current_streak,
         best_streak,
         last_active_date,
-        active_dates: last_active_date ? [last_active_date] : [],
+        active_dates: streakInfo.activeDates,
         total_xp,
         revision_solved_count: statsRow?.revision_solved_count || 0,
         revision_bonus_xp: statsRow?.revision_bonus_xp || 0,
@@ -1269,11 +1381,12 @@ export const userStatsService = {
     let revision_solved_count = 0;
     let revision_bonus_xp = 0;
     let revision_completed_ids: string[] = [];
+    const subDates: string[] = [];
 
     if (userId && isValidUUID(userId)) {
       try {
         const [subsRes, profRes, statsRes] = await Promise.all([
-          db.from('code_submissions').select('problem_id, status, test_cases_passed, total_test_cases').eq('user_id', userId),
+          db.from('code_submissions').select('problem_id, status, test_cases_passed, total_test_cases, created_at').eq('user_id', userId),
           db.from('profiles').select('*').eq('id', userId).maybeSingle(),
           db.from('user_stats').select('*').eq('user_id', userId).maybeSingle()
         ]);
@@ -1286,6 +1399,7 @@ export const userStatsService = {
             if (isAccepted && s.problem_id) {
               const canonical = resolveCanonicalProblemId(s.problem_id);
               if (canonical) solvedSet.add(canonical);
+              if (s.created_at) subDates.push(s.created_at);
             }
           });
         }
@@ -1293,10 +1407,19 @@ export const userStatsService = {
         const profData = profRes.data;
         const statsData = statsRes.data;
 
-        if (profData?.current_streak) current_streak = Math.max(current_streak, profData.current_streak);
-        if (statsData?.current_streak) current_streak = Math.max(current_streak, statsData.current_streak);
-        if (profData?.last_active_date) last_active_date = profData.last_active_date;
-        if (statsData?.last_active_date) last_active_date = statsData.last_active_date;
+        if (profData?.last_active_date) subDates.push(profData.last_active_date);
+        if (statsData?.last_active_date) subDates.push(statsData.last_active_date);
+
+        const streakInfo = calculateStreakFromDates(
+          subDates,
+          statsData?.last_active_date || profData?.last_active_date,
+          statsData?.current_streak || profData?.current_streak
+        );
+
+        current_streak = streakInfo.currentStreak;
+        best_streak = Math.max(streakInfo.bestStreak, statsData?.best_streak || 0, current_streak);
+        last_active_date = streakInfo.lastActiveDate;
+        active_dates = streakInfo.activeDates;
       } catch {}
     }
 
@@ -1316,21 +1439,11 @@ export const userStatsService = {
 
     const total_solved = solvedArr.length;
 
-    if (total_solved > 0) {
-      if (!last_active_date) {
-        last_active_date = today;
-        active_dates = [today];
-      }
-      current_streak = Math.max(current_streak, 1);
-    } else {
+    if (total_solved === 0) {
       current_streak = 0;
       best_streak = 0;
       last_active_date = '';
       active_dates = [];
-    }
-
-    if (current_streak > best_streak) {
-      best_streak = current_streak;
     }
 
     const total_xp = total_solved > 0 
@@ -1390,19 +1503,20 @@ export const userStatsService = {
       const baseXP = difficulty === 'Easy' ? 10 : difficulty === 'Medium' ? 25 : 50;
       stats.total_xp = (stats.total_xp || 0) + baseXP;
 
-      // 2. Calculate Streak
-      if (stats.last_active_date === today) {
-        if (stats.current_streak === 0) stats.current_streak = 1;
-      } else if (stats.last_active_date === yesterday) {
-        stats.current_streak += 1;
-      } else {
-        stats.current_streak = 1;
+      // 2. Calculate Streak using exact calendar math
+      const activeDates = [...(stats.active_dates || [])];
+      if (!activeDates.includes(today)) {
+        activeDates.push(today);
       }
 
+      const streakInfo = calculateStreakFromDates(
+        activeDates,
+        today,
+        (stats.last_active_date === yesterday ? stats.current_streak + 1 : (stats.last_active_date === today ? Math.max(1, stats.current_streak) : 1))
+      );
+      stats.current_streak = Math.max(1, streakInfo.currentStreak);
       stats.last_active_date = today;
-      if (!stats.active_dates.includes(today)) {
-        stats.active_dates.push(today);
-      }
+      stats.active_dates = streakInfo.activeDates;
       stats.best_streak = Math.max(stats.best_streak, stats.current_streak);
 
       // Sync stats to Supabase profiles & user_stats immediately
@@ -1450,19 +1564,13 @@ export const userStatsService = {
           }
         };
 
-        if (options?.userId) {
-          saveToSupabase(options.userId).catch((err) =>
-            console.warn('Direct Supabase stats sync error:', err)
-          );
-        } else {
-          supabase.auth.getSession().then(({ data: { session } }) => {
-            const userId = session?.user?.id;
-            if (userId) {
-              saveToSupabase(userId).catch((err) =>
-                console.warn('Session Supabase stats sync error:', err)
-              );
-            }
-          });
+        let targetUid = options?.userId || null;
+        if (!targetUid) {
+          const { data: sessionData } = await supabase.auth.getSession();
+          targetUid = sessionData?.session?.user?.id || null;
+        }
+        if (targetUid && isValidUUID(targetUid)) {
+          await saveToSupabase(targetUid);
         }
       } catch (e) {
         console.warn('Supabase stats sync note:', e);
@@ -1554,14 +1662,14 @@ export const leaderboardService = {
       // Parallel fetch for profiles and code submissions
       const [profilesRes, submissionsRes] = await Promise.all([
         db.from('profiles').select('*'),
-        db.from('code_submissions').select('user_id, problem_id, status, test_cases_passed, total_test_cases'),
+        db.from('code_submissions').select('user_id, problem_id, status, test_cases_passed, total_test_cases, created_at'),
       ]);
 
       const dbProfiles = profilesRes.data || [];
       const allSubs = submissionsRes.data || [];
 
-      // Build a map of user_id -> solved problem difficulty counts from actual accepted submissions
-      const userSubmissionsMap = new Map<string, { total: number; easy: number; medium: number; hard: number; problemIds: Set<string> }>();
+      // Build a map of user_id -> solved problem difficulty counts and dates from actual accepted submissions
+      const userSubmissionsMap = new Map<string, { total: number; easy: number; medium: number; hard: number; problemIds: Set<string>; dates: string[] }>();
       if (Array.isArray(allSubs)) {
         allSubs.forEach((sub: any) => {
           if (!sub.user_id || !sub.problem_id) return;
@@ -1570,7 +1678,7 @@ export const leaderboardService = {
           if (!isAccepted) return;
 
           if (!userSubmissionsMap.has(sub.user_id)) {
-            userSubmissionsMap.set(sub.user_id, { total: 0, easy: 0, medium: 0, hard: 0, problemIds: new Set() });
+            userSubmissionsMap.set(sub.user_id, { total: 0, easy: 0, medium: 0, hard: 0, problemIds: new Set(), dates: [] });
           }
           const userSub = userSubmissionsMap.get(sub.user_id)!;
           const canonicalId = resolveCanonicalProblemId(sub.problem_id);
@@ -1582,6 +1690,9 @@ export const leaderboardService = {
             else if (diff === 'Medium') userSub.medium++;
             else if (diff === 'Hard') userSub.hard++;
             userSub.total++;
+          }
+          if (sub.created_at) {
+            userSub.dates.push(sub.created_at);
           }
         });
       }
@@ -1595,7 +1706,13 @@ export const leaderboardService = {
           const mSolved = subInfo?.medium || 0;
           const hSolved = subInfo?.hard || 0;
           const tSolved = subInfo?.total || 0;
-          const streak = tSolved > 0 ? (p.current_streak || 1) : 0;
+
+          const streakInfo = calculateStreakFromDates(
+            subInfo?.dates || [],
+            p.last_active_date,
+            p.current_streak
+          );
+          const streak = tSolved > 0 ? streakInfo.currentStreak : 0;
           const xp = tSolved > 0 ? (eSolved * 10) + (mSolved * 25) + (hSolved * 50) + (streak * 15) : 0;
 
           const displayName = p.display_name || (p.email ? p.email.split('@')[0] : 'Coder');
